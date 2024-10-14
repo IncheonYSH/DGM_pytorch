@@ -19,7 +19,7 @@ python data_preprocess_all.py \
     --output_path </your/data/output/dir>
 ```
 
-Then, 13 filed would be created in your output directory. We will use `labeled_train.txt`, `labeled_validation.txt`, `labeled_test.txt` in our training code.
+Then, 13 file would be created in your output directory. We will use `labeled_train.txt`, `labeled_validation.txt`, `labeled_test.txt` in our training code.
 
 ## Training
 
