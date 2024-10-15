@@ -12,14 +12,14 @@ Run the shell script bellow
 
 ```bash
 python data_preprocess_all.py \
-    --base_path <your/mimic-cxr-jpg/directory/ends/like/mimic-cxr-jpg/2.1.0/files> \
-    --pa_base_path <your/pa_filetered_image/directory/ends/like/physionet.org/pa_filter/pa_filtered_images> \
+    --base_path <your/mimic-cxr-jpg/directory/ends/with/mimic-cxr-jpg/2.1.0/files> \
+    --pa_base_path <your/pa_filetered_image/directory/ends/with/physionet.org/pa_filter/pa_filtered_images> \
     --csv_file </standard/test-train/split/in/mimic-cxr/mimic-cxr-2.0.0-split.csv> \
     --label_csv_file </your/mimic-cxr/chexpert/label/path/mimic-cxr-2.0.0-chexpert.csv> \
     --output_path </your/data/output/dir>
 ```
 
-Then, 13 file would be created in your output directory. We will use `labeled_train.txt`, `labeled_validation.txt`, `labeled_test.txt` in our training code.
+Then, 13 files would be created in your output directory. We will use `labeled_train.txt`, `labeled_validation.txt`, `labeled_test.txt` in our training code.
 
 ## Training
 
