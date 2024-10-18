@@ -12,6 +12,7 @@ import random
 import numpy as np
 import logging
 import sys
+import math
 
 # Logging 설정
 logging.basicConfig(level=logging.INFO,
@@ -39,8 +40,8 @@ def train(args):
     params = list(E_G.parameters()) + list(E_F.parameters()) + \
              list(D_G.parameters()) + list(D_F.parameters()) + \
              list(D_J.parameters())
-    optimizer_G = optim.Adam(params, lr=args.initial_lr, betas=(0.5, 0.999), weight_decay=args.weight_decay)
-    optimizer_D = optim.Adam(D_Disc.parameters(), lr=args.initial_lr, betas=(0.5, 0.999))
+    optimizer_G = optim.Adam(params, lr=args.initial_lr_g, betas=(0.5, 0.999), weight_decay=args.weight_decay)
+    optimizer_D = optim.Adam(D_Disc.parameters(), lr=args.initial_lr_d, betas=(0.5, 0.999))
 
     # 체크포인트 디렉토리 생성
     os.makedirs(args.checkpoint_dir, exist_ok=True)
@@ -96,7 +97,7 @@ def train(args):
         D_J.train()
         D_Disc.train()
 
-        loop = tqdm(dataloader, total=len(dataloader), leave=False)
+        loop = tqdm(dataloader, total=len(dataloader), leave=True)
         for idx, (img, label) in enumerate(loop):
             img = img.to(device)
             label = label.to(device)
@@ -150,7 +151,9 @@ def train(args):
 
             # 학습 초기에는 log D(G(z)) 사용 - This option is not recommanded in this model
             if args.alt_loss and epoch < args.alt_loss_epochs:
-                loss_G_adv = criterion_BCE(torch.sigmoid(D_fake), torch.ones_like(D_fake))
+                # loss_G_adv = criterion_BCE(torch.sigmoid(D_fake), torch.ones_like(D_fake))
+                # MSE loss instead of BCE loss(LSGAN)
+                loss_G_adv = - 0.5 * criterion_MSE(D_fake, torch.zeros_like(D_fake))
             else:
                 loss_G_adv = 0.5 * criterion_MSE(D_fake, torch.ones_like(D_fake))
 
@@ -175,13 +178,17 @@ def train(args):
             loop.set_postfix(loss_G=loss_G.item(), loss_D=loss_D.item())
 
             # console log
-            logging.info(f"Epoch [{epoch+1}/{args.epochs}] Batch [{idx+1}/{len(dataloader)}]: "
-                         f"loss_G = {loss_G.item():.6f}, loss_D = {loss_D.item():.6f}")
+            # logging.info(f"Epoch [{epoch+1}/{args.epochs}] Batch [{idx+1}/{len(dataloader)}]: "
+            #              f"loss_G = {loss_G.item():.6f}, loss_D = {loss_D.item():.6f}")
 
             # 텐서보드 로깅
             global_step = epoch * len(dataloader) + idx
             writer.add_scalar('Loss/Generator', loss_G.item(), global_step)
             writer.add_scalar('Loss/Discriminator', loss_D.item(), global_step)
+
+            # 학습률 로깅 (Generator와 Discriminator 각각)
+            writer.add_scalar('LR/Generator', optimizer_G.param_groups[0]['lr'], global_step)
+            writer.add_scalar('LR/Discriminator', optimizer_D.param_groups[0]['lr'], global_step)
 
             # Generator 손실의 각 항목 로깅
             writer.add_scalar('Loss_G/Adversarial', loss_G_adv.item(), global_step)
@@ -283,7 +290,7 @@ def total_variation_loss(x):
     return tv_h + tv_w
 
 # Add --continue_train for continuous training. LR and hyperparameters will would be adjusted automatically.
-# python train.py --batch_size 64 --d_steps 1 --gpu 1 --train_file_list ./data/labeled_train.txt --val_file_list ./data/labeled_validation.txt
+# python train.py --batch_size 64 --d_steps 1 --gpu 0 --train_file_list ./data/labeled_train.txt --val_file_list ./data/labeled_validation.txt
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument('--continue_train', action='store_true', help='계속 학습 여부')
@@ -291,7 +298,8 @@ if __name__ == "__main__":
     parser.add_argument('--gpu', type=int, default=0, help='사용할 GPU 번호')
     parser.add_argument('--epochs', type=int, default=30, help='총 학습 에포크 수')
     parser.add_argument('--batch_size', type=int, default=1, help='배치 크기')
-    parser.add_argument('--initial_lr', type=float, default=1e-5, help='초기 학습률')
+    parser.add_argument('--initial_lr_g', type=float, default=1e-5, help='generator 초기 학습률')
+    parser.add_argument('--initial_lr_d', type=float, default=1e-5, help='discriminator 초기 학습률')
     parser.add_argument('--weight_decay', type=float, default=1e-4, help='가중치 감소율')
     parser.add_argument('--decay_epoch', type=int, default=10, help='학습률 감소 주기')
     parser.add_argument('--lr_decay', type=float, default=0.5, help='학습률 감소 비율')

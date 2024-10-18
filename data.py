@@ -48,7 +48,8 @@ class ImageDataset(Dataset):
                         continue
                     self.image_paths.append(image_path)
                     self.labels.append(label)
-
+        
+        logging.info(f"이미지 경로 파일 확인: {data_file_paths}")
         logging.info(f"총 이미지 수: {len(self.image_paths)}")
         logging.info(f"정상 이미지 수: {normal_count}")
         logging.info(f"비정상 이미지 수: {abnormal_count}")

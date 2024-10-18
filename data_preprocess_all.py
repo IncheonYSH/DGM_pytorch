@@ -19,11 +19,11 @@ def setup_logger(output_path):
     )
     
     # 콘솔에도 로그를 출력하도록 설정
-    console = logging.StreamHandler()
-    console.setLevel(logging.INFO)
-    formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
-    console.setFormatter(formatter)
-    logging.getLogger('').addHandler(console)
+    # console = logging.StreamHandler()
+    # console.setLevel(logging.INFO)
+    # formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
+    # console.setFormatter(formatter)
+    # logging.getLogger('').addHandler(console)
 
 def generate_split_files(base_path, csv_file, output_path):
     # 로거 설정
