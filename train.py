@@ -19,6 +19,39 @@ logging.basicConfig(level=logging.INFO,
                     format='%(asctime)s - [%(levelname)s] - %(message)s',
                     datefmt='%Y-%m-%d %H:%M:%S', stream=sys.stderr)
 
+def log_hyperparameters(args):
+    logging.info("===== Hyperparameters =====")
+    logging.info(f"Continue Training: {args.continue_train}")
+    logging.info(f"Checkpoint Directory: {args.checkpoint_dir}")
+    logging.info(f"GPU: {args.gpu}")
+    logging.info(f"Total Epochs: {args.epochs}")
+    logging.info(f"Batch Size: {args.batch_size}")
+    logging.info(f"Generator Initial Learning Rate: {args.initial_lr_g}")
+    logging.info(f"Discriminator Initial Learning Rate: {args.initial_lr_d}")
+    logging.info(f"Weight Decay: {args.weight_decay}")
+    logging.info(f"Min Learning Rate: {args.min_lr}")
+    logging.info(f"Warm-up Iterations: {args.warmup_iters}")
+    logging.info(f"Learning Rate Decay Iterations: {args.lr_decay_iters}")
+    logging.info(f"Learning Rate Scheduler: {args.lr_scheduler}")
+    
+    if args.lr_scheduler == 'step_decay':
+        logging.info(f"Learning Rate Decay Epoch: {args.decay_epoch}")
+        logging.info(f"Learning Rate Decay Factor: {args.lr_decay}")
+    elif args.lr_scheduler == 'cosine_decay':
+        logging.info("Cosine decay with warm-up enabled")
+        
+    logging.info(f"Adversarial Loss Weight (lambda_A): {args.lambda_A}")
+    logging.info(f"Reconstruction Loss Weight (lambda_R): {args.lambda_R}")
+    logging.info(f"Total Variation Loss Weight (lambda_TV): {args.lambda_TV}")
+    
+    if args.alt_loss:
+        logging.info(f"Alternative Loss enabled for {args.alt_loss_epochs} epochs")
+    
+    logging.info(f"Discriminator Update Steps per Iteration: {args.d_steps}")
+    logging.info(f"Training File List: {args.train_file_list}")
+    logging.info(f"Validation File List: {args.val_file_list}")
+    logging.info("===========================")
+
 def get_lr(it, warmup_iters, lr_decay_iters, learning_rate, min_lr):
     if it < warmup_iters:
         return learning_rate * it / warmup_iters
@@ -37,6 +70,8 @@ def set_seed(seed):
 
 def train(args):
     device = torch.device(f"cuda:{args.gpu}" if torch.cuda.is_available() else "cpu")
+
+    log_hyperparameters(args)
 
     # 모델 초기화
     E_G = EncoderG().to(device)
