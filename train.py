@@ -19,6 +19,16 @@ logging.basicConfig(level=logging.INFO,
                     format='%(asctime)s - [%(levelname)s] - %(message)s',
                     datefmt='%Y-%m-%d %H:%M:%S', stream=sys.stderr)
 
+def get_lr(it, warmup_iters, lr_decay_iters, learning_rate, min_lr):
+    if it < warmup_iters:
+        return learning_rate * it / warmup_iters
+    if it > lr_decay_iters:
+        return min_lr
+    decay_ratio = (it - warmup_iters) / (lr_decay_iters - warmup_iters)
+    assert 0 <= decay_ratio <= 1
+    coeff = 0.5 * (1.0 + math.cos(math.pi * decay_ratio))  # coeff ranges 0..1
+    return min_lr + coeff * (learning_rate - min_lr)
+
 def set_seed(seed):
     torch.manual_seed(seed)
     torch.cuda.manual_seed_all(seed)
@@ -88,6 +98,9 @@ def train(args):
     lambda_A = args.lambda_A
     lambda_R = args.lambda_R
     lambda_TV = args.lambda_TV
+    warmup_iters = args.warmup_iters
+    lr_decay_iters = args.lr_decay_iters
+    global_step = 0
 
     for epoch in range(start_epoch, args.epochs):
         E_G.train()
@@ -101,6 +114,21 @@ def train(args):
         for idx, (img, label) in enumerate(loop):
             img = img.to(device)
             label = label.to(device)
+            if args.lr_scheduler == 'cosine_decay':
+                # Cosine decay with warmup 적용
+                new_lr_g = get_lr(global_step, warmup_iters, lr_decay_iters, args.initial_lr_g, args.min_lr)
+                for param_group in optimizer_G.param_groups:
+                    param_group['lr'] = new_lr_g                
+                new_lr_d = get_lr(global_step, warmup_iters, lr_decay_iters, args.initial_lr_d, args.min_lr)
+                for param_group in optimizer_D.param_groups:
+                    param_group['lr'] = new_lr_d
+
+            elif args.lr_scheduler == 'step_decay' and (epoch + 1) % args.decay_epoch == 0:
+                # 기존의 step decay 적용
+                for param_group in optimizer_G.param_groups:
+                    param_group['lr'] *= args.lr_decay
+                for param_group in optimizer_D.param_groups:
+                    param_group['lr'] *= args.lr_decay
 
             ############################
             # (1) Update D network: k steps
@@ -301,8 +329,12 @@ if __name__ == "__main__":
     parser.add_argument('--initial_lr_g', type=float, default=1e-5, help='generator 초기 학습률')
     parser.add_argument('--initial_lr_d', type=float, default=1e-5, help='discriminator 초기 학습률')
     parser.add_argument('--weight_decay', type=float, default=1e-4, help='가중치 감소율')
-    parser.add_argument('--decay_epoch', type=int, default=10, help='학습률 감소 주기')
-    parser.add_argument('--lr_decay', type=float, default=0.5, help='학습률 감소 비율')
+    parser.add_argument('--min_lr', type=float, default=1e-6, help='최소 학습률')
+    parser.add_argument('--warmup_iters', type=int, default=1000, help='warmup 단계의 반복 수')
+    parser.add_argument('--lr_decay_iters', type=int, default=45000, help='학습률이 최소가 되는 반복 수')
+    parser.add_argument('--lr_scheduler', type=str, choices=['step_decay', 'cosine_decay'], default='step_decay', help='학습률 스케줄링 방식 선택')
+    parser.add_argument('--decay_epoch', type=int, default=10, help='step decay에서 학습률 감소 주기')
+    parser.add_argument('--lr_decay', type=float, default=0.5, help='step decay에서 학습률 감소 비율')
     parser.add_argument('--lambda_A', type=float, default=10.0, help='적대적 손실 가중치')
     parser.add_argument('--lambda_R', type=float, default=10.0, help='복원 손실 가중치')
     parser.add_argument('--lambda_TV', type=float, default=1.0, help='총 변동 손실 가중치')
