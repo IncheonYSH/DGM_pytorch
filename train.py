@@ -94,6 +94,7 @@ def train(args):
 
     # 로드 옵션
     start_epoch = 0
+    global_step = 0
     best_val_loss = float('inf')
     if args.continue_train:
         if os.path.exists(checkpoint_path):
@@ -112,7 +113,6 @@ def train(args):
             print(f"체크포인트 '{checkpoint_path}'에서 로드하였습니다. 재개 에포크: {start_epoch}")
         else:
             print(f"체크포인트 '{checkpoint_path}'가 존재하지 않습니다. 새로 학습을 시작합니다.")
-            global_step = 0
     else:
         print("새로 학습을 시작합니다.")
 
