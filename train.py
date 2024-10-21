@@ -108,9 +108,11 @@ def train(args):
             optimizer_D.load_state_dict(checkpoint['optimizer_D'])
             start_epoch = checkpoint['epoch'] + 1
             best_val_loss = checkpoint.get('best_val_loss', float('inf'))
+            global_step = checkpoint.get('global_step', step_epoch * len(dataloader))
             print(f"체크포인트 '{checkpoint_path}'에서 로드하였습니다. 재개 에포크: {start_epoch}")
         else:
             print(f"체크포인트 '{checkpoint_path}'가 존재하지 않습니다. 새로 학습을 시작합니다.")
+            global_step = 0
     else:
         print("새로 학습을 시작합니다.")
 
@@ -135,7 +137,6 @@ def train(args):
     lambda_TV = args.lambda_TV
     warmup_iters = args.warmup_iters
     lr_decay_iters = args.lr_decay_iters
-    global_step = 0
 
     for epoch in range(start_epoch, args.epochs):
         E_G.train()
@@ -294,6 +295,7 @@ def train(args):
             best_val_loss = val_loss
             torch.save({
                 'epoch': epoch,
+                'global_step': global_step,
                 'E_G': E_G.state_dict(),
                 'E_F': E_F.state_dict(),
                 'D_G': D_G.state_dict(),
