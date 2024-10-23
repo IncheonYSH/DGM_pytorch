@@ -21,6 +21,7 @@ logging.basicConfig(level=logging.INFO,
 
 def log_hyperparameters(args):
     logging.info("===== Hyperparameters =====")
+    logging.info(f"Always save checkpoint: {args.always_save_checkpoint}")
     logging.info(f"Continue Training: {args.continue_train}")
     logging.info(f"Checkpoint Directory: {args.checkpoint_dir}")
     logging.info(f"GPU: {args.gpu}")
@@ -291,7 +292,7 @@ def train(args):
             writer.add_scalar('Loss/Validation', val_loss, epoch)
 
         # 최고 검증 손실 갱신 및 모델 저장
-        if val_loss < best_val_loss:
+        if val_loss < best_val_loss or args.always_save_checkpoint:
             best_val_loss = val_loss
             torch.save({
                 'epoch': epoch,
@@ -306,7 +307,7 @@ def train(args):
                 'optimizer_D': optimizer_D.state_dict(),
                 'best_val_loss': best_val_loss
             }, checkpoint_path)
-            print(f"Epoch [{epoch+1}/{args.epochs}] - Validation loss updated: {val_loss:.4f}. model saved.")
+            print(f"Epoch [{epoch+1}/{args.epochs}] - Validation loss: {val_loss:.4f}. model saved.")
         else:
             print(f"Epoch [{epoch+1}/{args.epochs}] - Validation loss: {val_loss:.4f}.")
 
@@ -358,6 +359,7 @@ def total_variation_loss(x):
 # python train.py --batch_size 64 --d_steps 1 --gpu 0 --train_file_list ./data/labeled_train.txt --val_file_list ./data/labeled_validation.txt
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
+    parser.add_argument('--always_save_checkpoint', action='store_true', help='Always save a checkpoint after each eval0')
     parser.add_argument('--continue_train', action='store_true', help='계속 학습 여부')
     parser.add_argument('--checkpoint_dir', type=str, default='./chkpts', help='체크포인트 저장 디렉토리')
     parser.add_argument('--gpu', type=int, default=0, help='사용할 GPU 번호')
