@@ -273,6 +273,7 @@ def train(args):
             D_fake = D_Disc(y_prime)
 
             # 학습 초기에는 log D(G(z)) 사용 - This option is not recommanded in this model
+            # It's from vanila GAN paper. But, it is simply expanded with changes of adverserial loss function. Need experiment for this changes.
             if args.alt_loss and epoch < args.alt_loss_epochs:
                 loss_G_adv = - criterion_adversarial(D_fake, torch.zeros_like(D_fake))
             else:
@@ -425,6 +426,7 @@ if __name__ == "__main__":
     parser.add_argument('--epochs', type=int, default=30, help='총 학습 에포크 수')
     parser.add_argument('--batch_size', type=int, default=1, help='배치 크기')
     ### Select main training algorithm(default is the LSGAN as mentioned in original paper) ###
+    ### Batch normalization is not recommaned in WGANs(from paper) ###
     parser.add_argument('--base_GAN',type=str, default='LSGAN', choices=['GAN', 'LSGAN', 'WGAN', 'WGANGP'], help='Select basement GAN')
     ### WGAN clip boundary ###
     parser.add_argument('--clip_value', type=float, default=0.01, help='Clip boundary for WGAN training') # default value from paper
