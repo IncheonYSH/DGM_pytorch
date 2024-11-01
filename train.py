@@ -13,6 +13,8 @@ import numpy as np
 import logging
 import sys
 import math
+import torch.nn.functional as F
+from torch.autograd import grad
 
 # Logging 설정
 logging.basicConfig(level=logging.INFO,
@@ -27,12 +29,10 @@ def log_hyperparameters(args):
     logging.info(f"GPU: {args.gpu}")
     logging.info(f"Total Epochs: {args.epochs}")
     logging.info(f"Batch Size: {args.batch_size}")
+    logging.info(f"GAN type: {args.base_GAN}")
     logging.info(f"Generator Initial Learning Rate: {args.initial_lr_g}")
     logging.info(f"Discriminator Initial Learning Rate: {args.initial_lr_d}")
     logging.info(f"Weight Decay: {args.weight_decay}")
-    logging.info(f"Min Learning Rate: {args.min_lr}")
-    logging.info(f"Warm-up Iterations: {args.warmup_iters}")
-    logging.info(f"Learning Rate Decay Iterations: {args.lr_decay_iters}")
     logging.info(f"Learning Rate Scheduler: {args.lr_scheduler}")
     
     if args.lr_scheduler == 'step_decay':
@@ -40,10 +40,16 @@ def log_hyperparameters(args):
         logging.info(f"Learning Rate Decay Factor: {args.lr_decay}")
     elif args.lr_scheduler == 'cosine_decay':
         logging.info("Cosine decay with warm-up enabled")
+        logging.info(f"Warm-up Iterations: {args.warmup_iters}")
+        logging.info(f"Learning Rate Decay Iterations: {args.lr_decay_iters}")
+        logging.info(f"Min Learning Rate: {args.min_lr}")
         
     logging.info(f"Adversarial Loss Weight (lambda_A): {args.lambda_A}")
     logging.info(f"Reconstruction Loss Weight (lambda_R): {args.lambda_R}")
     logging.info(f"Total Variation Loss Weight (lambda_TV): {args.lambda_TV}")
+
+    if args.base_GAN == 'WGANGP':
+        logging.info(f"Gradient Penalty Weight (lambda_GP): {args.lambda_GP}")
     
     if args.alt_loss:
         logging.info(f"Alternative Loss enabled for {args.alt_loss_epochs} epochs")
@@ -69,8 +75,34 @@ def set_seed(seed):
     np.random.seed(seed)
     random.seed(seed)
 
+def compute_gradient_penalty(D, real_samples, fake_samples):
+    """Calculates the gradient penalty loss for WGAN GP"""
+    # Random weight term for interpolation between real and fake samples
+    alpha = torch.rand(real_samples.size(0), 1, 1, 1, device=real_samples.device)
+    # Get random interpolation between real and fake samples
+    interpolates = (alpha * real_samples + ((1 - alpha) * fake_samples)).requires_grad_(True)
+    d_interpolates = D(interpolates)
+    # Get gradient w.r.t. interpolates
+    gradients = grad(
+        outputs=d_interpolates,
+        inputs=interpolates,
+        grad_outputs=torch.ones_like(d_interpolates),
+        create_graph=True,
+        retain_graph=True,
+        only_inputs=True,
+    )[0]
+    gradients = gradients.view(gradients.size(0), -1)
+    gradient_penalty = ((gradients.norm(2, dim=1) - 1) ** 2).mean()
+    return gradient_penalty
+
 def train(args):
     device = torch.device(f"cuda:{args.gpu}" if torch.cuda.is_available() else "cpu")
+    print(device)
+    # 현재 PyTorch와 CUDA 버전 확인
+    print("PyTorch version:", torch.__version__)
+    print("CUDA available:", torch.cuda.is_available())
+    print("CUDA version:", torch.version.cuda)
+
 
     log_hyperparameters(args)
 
@@ -86,8 +118,8 @@ def train(args):
     params = list(E_G.parameters()) + list(E_F.parameters()) + \
              list(D_G.parameters()) + list(D_F.parameters()) + \
              list(D_J.parameters())
-    optimizer_G = optim.Adam(params, lr=args.initial_lr_g, betas=(0.5, 0.999), weight_decay=args.weight_decay)
-    optimizer_D = optim.Adam(D_Disc.parameters(), lr=args.initial_lr_d, betas=(0.5, 0.999))
+    optimizer_G = optim.Adam(params, lr=args.initial_lr_g, betas=(args.beta_1, args.beta_2), weight_decay=args.weight_decay)
+    optimizer_D = optim.Adam(D_Disc.parameters(), lr=args.initial_lr_d, betas=(args.beta_1, args.beta_2))
 
     # 체크포인트 디렉토리 생성
     os.makedirs(args.checkpoint_dir, exist_ok=True)
@@ -108,19 +140,35 @@ def train(args):
             D_Disc.load_state_dict(checkpoint['D_Disc'])
             optimizer_G.load_state_dict(checkpoint['optimizer_G'])
             optimizer_D.load_state_dict(checkpoint['optimizer_D'])
-            start_epoch = checkpoint['epoch'] + 1
+            completed_epoch = checkpoint['epoch']
+            start_epoch = completed_epoch + 1
             best_val_loss = checkpoint.get('best_val_loss', float('inf'))
-            global_step = checkpoint.get('global_step', step_epoch * len(dataloader))
+            global_step = checkpoint.get('global_step', completed_epoch * len(dataloader))
             print(f"체크포인트 '{checkpoint_path}'에서 로드하였습니다. 재개 에포크: {start_epoch}")
         else:
             print(f"체크포인트 '{checkpoint_path}'가 존재하지 않습니다. 새로 학습을 시작합니다.")
     else:
         print("새로 학습을 시작합니다.")
 
-    # 손실 함수
+    # Criterion setup based on selecte GAN
+    # format: criterion_adversarial(arg1, arg2)
     criterion_L1 = nn.L1Loss()
-    criterion_MSE = nn.MSELoss()
-    criterion_BCE = nn.BCELoss()
+    clip_value = torch.inf
+    is_clamping = False
+    is_gradient_penalty = False
+    if args.base_GAN == 'LSGAN':
+        criterion_adversarial = lambda arg1, arg2: 0.5 * F.mse_loss(arg1, arg2)
+    elif args.base_GAN == 'GAN':
+        criterion_adversarial = lambda arg1, arg2: 0.5 * F.binary_cross_entropy(torch.sigmoid(arg1), arg2)
+    elif args.base_GAN == 'WGAN':
+        criterion_adversarial = lambda arg1, arg2: torch.where(arg2.view(-1)[0] == 1, -torch.mean(arg1), torch.mean(arg1))
+        clip_value = args.clip_value
+        is_clamping = True
+    elif args.base_GAN == 'WGANGP':
+        criterion_adversarial = lambda arg1, arg2: torch.where(arg2.view(-1)[0] == 1, -torch.mean(arg1), torch.mean(arg1))
+        is_gradient_penalty = True
+    else:
+        criterion_adversarial = None
 
     # 데이터 로더
     train_file_list = args.train_file_list
@@ -136,6 +184,7 @@ def train(args):
     lambda_A = args.lambda_A
     lambda_R = args.lambda_R
     lambda_TV = args.lambda_TV
+    lambda_GP = args.lambda_GP
     warmup_iters = args.warmup_iters
     lr_decay_iters = args.lr_decay_iters
 
@@ -171,6 +220,8 @@ def train(args):
             # (1) Update D network: k steps
             ###########################
             for _ in range(args.d_steps):
+                optimizer_D.zero_grad()
+
                 # 인코딩
                 c_z = E_G(img)
                 c_s = E_F(img)
@@ -183,23 +234,30 @@ def train(args):
                 D_real = D_Disc(img)
                 D_fake = D_Disc(y_prime.detach())
 
-                # BCE Loss - original GAN
-                # loss_D_real = criterion_BCE(torch.sigmoid(D_real), torch.ones_like(D_real))
-                # loss_D_fake = criterion_BCE(torch.sigmoid(D_fake), torch.zeros_like(D_fake))
-                # loss_D = 0.5 * (loss_D_real + loss_D_fake)
+                # Loss calculation for discriminator
+                loss_D_real = criterion_adversarial(D_real, torch.ones_like(D_real))
+                loss_D_fake = criterion_adversarial(D_fake, torch.zeros_like(D_fake))
+                loss_D = loss_D_real + loss_D_fake       
 
-                # LSGAN
-                loss_D_real = criterion_MSE(D_real, torch.ones_like(D_real))
-                loss_D_fake = criterion_MSE(D_fake, torch.zeros_like(D_fake))
-                loss_D = 0.5 * (loss_D_real + loss_D_fake)
-
-                optimizer_D.zero_grad()
+                # Gradient penalty for WGAN-GP
+                if is_gradient_penalty:
+                    gradient_penalty = compute_gradient_penalty(D_Disc, img, y_prime.detach())
+                    writer.add_scalar('Loss/Gradient penalty', gradient_penalty.item(), global_step)
+                    loss_D += lambda_GP * gradient_penalty
+                
                 loss_D.backward()
                 optimizer_D.step()
+
+                # Gradient clipping for WGAN and WGAN variant
+                if is_clamping:
+                    for p in D_Disc.parameters():
+                        p.data.clamp_(-clip_value, clip_value)
 
             ############################
             # (2) Update G network
             ###########################
+            optimizer_G.zero_grad()
+
             # 인코딩
             c_z = E_G(img)
             c_s = E_F(img)
@@ -216,11 +274,9 @@ def train(args):
 
             # 학습 초기에는 log D(G(z)) 사용 - This option is not recommanded in this model
             if args.alt_loss and epoch < args.alt_loss_epochs:
-                # loss_G_adv = criterion_BCE(torch.sigmoid(D_fake), torch.ones_like(D_fake))
-                # MSE loss instead of BCE loss(LSGAN)
-                loss_G_adv = - 0.5 * criterion_MSE(D_fake, torch.zeros_like(D_fake))
+                loss_G_adv = - criterion_adversarial(D_fake, torch.zeros_like(D_fake))
             else:
-                loss_G_adv = 0.5 * criterion_MSE(D_fake, torch.ones_like(D_fake))
+                loss_G_adv = criterion_adversarial(D_fake, torch.ones_like(D_fake))
 
             loss_R1 = criterion_L1(z_prime, img)
             loss_R2 = criterion_L1(z_double_prime, img)
@@ -234,7 +290,6 @@ def train(args):
             # 각 손실에 가중치 적용
             loss_G = lambda_A * loss_G_adv + lambda_R * (loss_R1 + loss_R2 + loss_R3) + lambda_TV * tv_loss
 
-            optimizer_G.zero_grad()
             loss_G.backward()
             optimizer_G.step()
 
@@ -341,12 +396,9 @@ def train(args):
             writer.add_image('Recon1 (z\')', grid_z_prime, epoch)
             writer.add_image('Recon2 (z\'\')', grid_z_double_prime, epoch)
 
-        # 학습률 감소
-        if (epoch + 1) % args.decay_epoch == 0:
-            for param_group in optimizer_G.param_groups:
-                param_group['lr'] *= args.lr_decay
-            for param_group in optimizer_D.param_groups:
-                param_group['lr'] *= args.lr_decay
+            # 텐서보드에 이미지 label 같이 기록
+            for i in range(num_samples):
+                writer.add_text(f'Label Info/Sample {i + 1}', f"Label: {label_sample[i].item()}", epoch)
 
     writer.close()
 
@@ -359,31 +411,49 @@ def total_variation_loss(x):
 # python train.py --batch_size 64 --d_steps 1 --gpu 0 --train_file_list ./data/labeled_train.txt --val_file_list ./data/labeled_validation.txt
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
+    ### Train/val set(necessary) ###
+    parser.add_argument('--train_file_list', nargs='+', required=True, help='학습용 이미지 경로 리스트 파일')
+    parser.add_argument('--val_file_list', nargs='+', required=True, help='검증용 이미지 경로 리스트 파일')
+    ### Save options ###
     parser.add_argument('--always_save_checkpoint', action='store_true', help='Always save a checkpoint after each eval0')
-    parser.add_argument('--continue_train', action='store_true', help='계속 학습 여부')
     parser.add_argument('--checkpoint_dir', type=str, default='./chkpts', help='체크포인트 저장 디렉토리')
+    ### Continue train ###
+    parser.add_argument('--continue_train', action='store_true', help='계속 학습 여부')
+    ### GPU ###
     parser.add_argument('--gpu', type=int, default=0, help='사용할 GPU 번호')
+    ### Training setup ###
     parser.add_argument('--epochs', type=int, default=30, help='총 학습 에포크 수')
     parser.add_argument('--batch_size', type=int, default=1, help='배치 크기')
+    ### Select main training algorithm(default is the LSGAN as mentioned in original paper) ###
+    parser.add_argument('--base_GAN',type=str, default='LSGAN', choices=['GAN', 'LSGAN', 'WGAN', 'WGANGP'], help='Select basement GAN')
+    ### WGAN clip boundary ###
+    parser.add_argument('--clip_value', type=float, default=0.01, help='Clip boundary for WGAN training') # default value from paper
+    ### Common optimizer setup ###
     parser.add_argument('--initial_lr_g', type=float, default=1e-5, help='generator 초기 학습률')
     parser.add_argument('--initial_lr_d', type=float, default=1e-5, help='discriminator 초기 학습률')
+    parser.add_argument('--lr_scheduler', type=str, choices=['step_decay', 'cosine_decay'], default='step_decay', help='학습률 스케줄링 방식 선택')
     parser.add_argument('--weight_decay', type=float, default=1e-4, help='가중치 감소율')
+    # (0, 0.9) for WGANs. (0.5, 0.999) for others
+    parser.add_argument('--beta_1', type=float, default=0.5, help="Adam optimizer momentum parameter")
+    parser.add_argument('--beta_2', type=float, default=0.999, help="Adam optimizer momentum parameter")
+    ### For cosine decay ###
     parser.add_argument('--min_lr', type=float, default=1e-6, help='최소 학습률')
     parser.add_argument('--warmup_iters', type=int, default=1000, help='warmup 단계의 반복 수')
     parser.add_argument('--lr_decay_iters', type=int, default=45000, help='학습률이 최소가 되는 반복 수')
-    parser.add_argument('--lr_scheduler', type=str, choices=['step_decay', 'cosine_decay'], default='step_decay', help='학습률 스케줄링 방식 선택')
+    ### For step decay ###
     parser.add_argument('--decay_epoch', type=int, default=10, help='step decay에서 학습률 감소 주기')
     parser.add_argument('--lr_decay', type=float, default=0.5, help='step decay에서 학습률 감소 비율')
+    ### Loss function hyperparameters ###
     parser.add_argument('--lambda_A', type=float, default=10.0, help='적대적 손실 가중치')
     parser.add_argument('--lambda_R', type=float, default=10.0, help='복원 손실 가중치')
     parser.add_argument('--lambda_TV', type=float, default=1.0, help='총 변동 손실 가중치')
-    parser.add_argument('--alt_loss', action='store_true', help='대안적인 학습 알고리즘 사용 여부')
-    parser.add_argument('--alt_loss_epochs', type=int, default=5, help='대안 손실 함수를 사용할 에포크 수')
+    parser.add_argument('--lambda_GP', type=float, default=10, help='Gradienta penalty 가중치')
+    ### Modified training algorithm options ###
+    parser.add_argument('--alt_loss', action='store_true', help='수정된 adverserial loss function 사용 여부')
+    parser.add_argument('--alt_loss_epochs', type=int, default=5, help='수정된 adverserial loss function 사용할 에포크 수')
+    # In original vanilla gan paper, 1~5 is recommanded. For WGAN, 5 is recommanded in original paper.
     parser.add_argument('--d_steps', type=int, default=1, help='D를 최적화할 스텝 수')
 
-    # 추가된 인자들
-    parser.add_argument('--train_file_list', nargs='+', required=True, help='학습용 이미지 경로 리스트 파일')
-    parser.add_argument('--val_file_list', nargs='+', required=True, help='검증용 이미지 경로 리스트 파일')
 
     args = parser.parse_args()
     set_seed(42)
