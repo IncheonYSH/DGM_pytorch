@@ -11,7 +11,7 @@
 /chkpts
 /__pycache__
 /data_test
-
+test_script/
 
 # Created by https://www.toptal.com/developers/gitignore/api/python
 # Edit at https://www.toptal.com/developers/gitignore?templates=python
