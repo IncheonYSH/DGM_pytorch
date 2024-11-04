@@ -112,7 +112,7 @@ def train(args):
     D_G = Decoder().to(device)
     D_F = Decoder().to(device)
     D_J = DecoderConcat().to(device)
-    D_Disc = Discriminator().to(device)
+    D_Disc = Discriminator(is_batch_normalization=args.is_batch_normalization).to(device)
 
     # 옵티마이저 설정
     params = list(E_G.parameters()) + list(E_F.parameters()) + \
@@ -137,6 +137,9 @@ def train(args):
             D_G.load_state_dict(checkpoint['D_G'])
             D_F.load_state_dict(checkpoint['D_F'])
             D_J.load_state_dict(checkpoint['D_J'])
+            # Discriminator setup
+            checkpoint_is_batch_normalization = checkpoint.get('is_batch_normalization', args.is_batch_normalization)
+            D_Disc = Discriminator(is_batch_normalization=checkpoint_is_batch_normalization).to(device)
             D_Disc.load_state_dict(checkpoint['D_Disc'])
             optimizer_G.load_state_dict(checkpoint['optimizer_G'])
             optimizer_D.load_state_dict(checkpoint['optimizer_D'])
@@ -361,7 +364,8 @@ def train(args):
                 'D_Disc': D_Disc.state_dict(),
                 'optimizer_G': optimizer_G.state_dict(),
                 'optimizer_D': optimizer_D.state_dict(),
-                'best_val_loss': best_val_loss
+                'best_val_loss': best_val_loss,
+                'is_batch_normalization': args.is_batch_normalization
             }, checkpoint_path)
             print(f"Epoch [{epoch+1}/{args.epochs}] - Validation loss: {val_loss:.4f}. model saved.")
         else:
@@ -428,6 +432,7 @@ if __name__ == "__main__":
     ### Select main training algorithm(default is the LSGAN as mentioned in original paper) ###
     ### Batch normalization is not recommaned in WGANs(from paper) ###
     parser.add_argument('--base_GAN',type=str, default='LSGAN', choices=['GAN', 'LSGAN', 'WGAN', 'WGANGP'], help='Select basement GAN')
+    parser.add_argument('--is_batch_normalization', action='store_true', help='Discriminator 의 batch normalization 사용 여부')
     ### WGAN clip boundary ###
     parser.add_argument('--clip_value', type=float, default=0.01, help='Clip boundary for WGAN training') # default value from paper
     ### Common optimizer setup ###
