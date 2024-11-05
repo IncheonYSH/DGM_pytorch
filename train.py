@@ -55,6 +55,7 @@ def log_hyperparameters(args):
         logging.info(f"Alternative Loss enabled for {args.alt_loss_epochs} epochs")
     
     logging.info(f"Discriminator Update Steps per Iteration: {args.d_steps}")
+    logging.info(f"Discriminator batch normalization: {args.is_batch_normalization}")
     logging.info(f"Training File List: {args.train_file_list}")
     logging.info(f"Validation File List: {args.val_file_list}")
     logging.info("===========================")
@@ -432,7 +433,7 @@ if __name__ == "__main__":
     ### Select main training algorithm(default is the LSGAN as mentioned in original paper) ###
     ### Batch normalization is not recommaned in WGANs(from paper) ###
     parser.add_argument('--base_GAN',type=str, default='LSGAN', choices=['GAN', 'LSGAN', 'WGAN', 'WGANGP'], help='Select basement GAN')
-    parser.add_argument('--is_batch_normalization', action='store_true', help='Discriminator 의 batch normalization 사용 여부')
+    parser.add_argument('--is_batch_normalization', type=lambda x: x.lower() == 'true', default=True, help='Discriminator 의 batch normalization 사용 여부')
     ### WGAN clip boundary ###
     parser.add_argument('--clip_value', type=float, default=0.01, help='Clip boundary for WGAN training') # default value from paper
     ### Common optimizer setup ###
