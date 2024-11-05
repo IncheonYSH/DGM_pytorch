@@ -32,6 +32,8 @@ def log_hyperparameters(args):
     logging.info(f"GAN type: {args.base_GAN}")
     logging.info(f"Generator Initial Learning Rate: {args.initial_lr_g}")
     logging.info(f"Discriminator Initial Learning Rate: {args.initial_lr_d}")
+    logging.info(f"Optimizer momentum, beta 1: {args.beta_1}")
+    logging.info(f"Optimizer momentum, beta 2: {args.beta_2}")
     logging.info(f"Weight Decay: {args.weight_decay}")
     logging.info(f"Learning Rate Scheduler: {args.lr_scheduler}")
     
