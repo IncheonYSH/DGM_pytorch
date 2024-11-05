@@ -80,12 +80,12 @@ class ImageDataset(Dataset):
 
 def get_dataloader(data_file_paths, batch_size=1, train=True):
     dataset = ImageDataset(data_file_paths, target_image_size=224)
-    dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=train, num_workers=8)
+    dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=train, num_workers=8, pin_memory=True)
     return dataloader
 
 def get_validation_dataloader(data_file_paths, batch_size=1):
     dataset = ImageDataset(data_file_paths, target_image_size=224)
-    val_loader = DataLoader(dataset, batch_size=batch_size, shuffle=False, num_workers=8)
+    val_loader = DataLoader(dataset, batch_size=batch_size, shuffle=False, num_workers=8, pin_memory=True)
     return val_loader
 
 # 예시 실행 방법:
