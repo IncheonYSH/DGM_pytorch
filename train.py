@@ -4,7 +4,7 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 from data import get_dataloader, get_validation_dataloader
-from model import EncoderG, EncoderF, Decoder, DecoderConcat, Discriminator
+from model import EncoderG, EncoderF, Decoder, DecoderConcat, Discriminator, NewDecoder, NewDecoderConcat, NewEncoder
 from torch.utils.tensorboard import SummaryWriter
 from tqdm import tqdm
 import torchvision.utils as vutils
@@ -15,6 +15,11 @@ import sys
 import math
 import torch.nn.functional as F
 from torch.autograd import grad
+from torch.cuda.amp import GradScaler, autocast
+import os
+os.environ["NUMEXPR_MAX_THREADS"] = "24"
+torch.set_num_threads(24)
+
 
 # Logging 설정
 logging.basicConfig(level=logging.INFO,
@@ -29,7 +34,10 @@ def log_hyperparameters(args):
     logging.info(f"GPU: {args.gpu}")
     logging.info(f"Total Epochs: {args.epochs}")
     logging.info(f"Batch Size: {args.batch_size}")
+    logging.info(f"Use Gradient Checkpointing: {args.use_checkpoint}")
+    logging.info(f"Backbone architecture: {args.architecture}")
     logging.info(f"GAN type: {args.base_GAN}")
+    logging.info(f"Target image size: {args.target_image_size}")
     logging.info(f"Generator Initial Learning Rate: {args.initial_lr_g}")
     logging.info(f"Discriminator Initial Learning Rate: {args.initial_lr_d}")
     logging.info(f"Optimizer momentum, beta 1: {args.beta_1}")
@@ -106,32 +114,15 @@ def train(args):
     print("CUDA available:", torch.cuda.is_available())
     print("CUDA version:", torch.version.cuda)
 
-
     log_hyperparameters(args)
 
-    # 모델 초기화
-    E_G = EncoderG().to(device)
-    E_F = EncoderF().to(device)
-    D_G = Decoder().to(device)
-    D_F = Decoder().to(device)
-    D_J = DecoderConcat().to(device)
-    D_Disc = Discriminator(is_batch_normalization=args.is_batch_normalization).to(device)
 
-    # 옵티마이저 설정
-    params = list(E_G.parameters()) + list(E_F.parameters()) + \
-             list(D_G.parameters()) + list(D_F.parameters()) + \
-             list(D_J.parameters())
-    optimizer_G = optim.Adam(params, lr=args.initial_lr_g, betas=(args.beta_1, args.beta_2), weight_decay=args.weight_decay)
-    optimizer_D = optim.Adam(D_Disc.parameters(), lr=args.initial_lr_d, betas=(args.beta_1, args.beta_2))
-
-    # 체크포인트 디렉토리 생성
-    os.makedirs(args.checkpoint_dir, exist_ok=True)
-    checkpoint_path = os.path.join(args.checkpoint_dir, 'checkpoint.pth')
 
     # 로드 옵션
     start_epoch = 0
     global_step = 0
     best_val_loss = float('inf')
+    backbone_architecture = args.architecture
     if args.continue_train:
         if os.path.exists(checkpoint_path):
             checkpoint = torch.load(checkpoint_path)
@@ -150,11 +141,84 @@ def train(args):
             start_epoch = completed_epoch + 1
             best_val_loss = checkpoint.get('best_val_loss', float('inf'))
             global_step = checkpoint.get('global_step', completed_epoch * len(dataloader))
+            backbone_architecture = checkpoint.get('backbone_architecture')
             print(f"체크포인트 '{checkpoint_path}'에서 로드하였습니다. 재개 에포크: {start_epoch}")
         else:
             print(f"체크포인트 '{checkpoint_path}'가 존재하지 않습니다. 새로 학습을 시작합니다.")
     else:
         print("새로 학습을 시작합니다.")
+
+    # 모델 초기화
+    if backbone_architecture == 'original':
+        E_G = EncoderG().to(device)
+        E_F = EncoderF().to(device)
+        D_G = Decoder().to(device)
+        D_F = Decoder().to(device)
+        D_J = DecoderConcat().to(device)
+        D_Disc = Discriminator(is_batch_normalization=args.is_batch_normalization).to(device)
+    else:
+        E_G = NewEncoder(
+                        in_channels=1,
+                        model_channels=64,
+                        channel_mult=(1, 2, 4, 8),
+                        num_res_blocks=4,
+                        attention_resolutions=(32, 16, 8),
+                        num_heads=1,
+                        num_head_channels=-1,
+                        use_checkpoint=args.use_checkpoint,
+                    ).to(device)
+        E_F = NewEncoder(
+                        in_channels=1,
+                        model_channels=64,
+                        channel_mult=(1, 2, 4, 8),
+                        num_res_blocks=4,
+                        attention_resolutions=(32, 16, 8),
+                        num_heads=1,
+                        num_head_channels=-1,
+                        use_checkpoint=args.use_checkpoint,
+                    ).to(device)
+        D_G = NewDecoder(
+                        out_channels=1,
+                        model_channels=64,
+                        channel_mult=(8, 4, 2, 1),
+                        num_res_blocks=4,
+                        attention_resolutions=(32, 16, 8),
+                        num_heads=1,
+                        num_head_channels=-1,
+                        use_checkpoint=args.use_checkpoint,
+                    ).to(device)
+        D_F = NewDecoder(
+                        out_channels=1,
+                        model_channels=64,
+                        channel_mult=(8, 4, 2, 1),
+                        num_res_blocks=4,
+                        attention_resolutions=(32, 16, 8),
+                        num_heads=1,
+                        num_head_channels=-1,
+                        use_checkpoint=args.use_checkpoint,
+                    ).to(device)
+        D_J = NewDecoderConcat(
+                        out_channels=1,
+                        model_channels=64,
+                        channel_mult=(8, 4, 2, 1),
+                        num_res_blocks=4,
+                        attention_resolutions=(32, 16, 8),
+                        num_heads=1,
+                        num_head_channels=-1,
+                        use_checkpoint=args.use_checkpoint,
+                    ).to(device)
+        D_Disc = Discriminator(is_batch_normalization=args.is_batch_normalization).to(device)
+
+    # 옵티마이저 설정
+    params = list(E_G.parameters()) + list(E_F.parameters()) + \
+             list(D_G.parameters()) + list(D_F.parameters()) + \
+             list(D_J.parameters())
+    optimizer_G = optim.Adam(params, lr=args.initial_lr_g, betas=(args.beta_1, args.beta_2), weight_decay=args.weight_decay)
+    optimizer_D = optim.Adam(D_Disc.parameters(), lr=args.initial_lr_d, betas=(args.beta_1, args.beta_2))
+
+    # 체크포인트 디렉토리 생성
+    os.makedirs(args.checkpoint_dir, exist_ok=True)
+    checkpoint_path = os.path.join(args.checkpoint_dir, 'checkpoint.pth')
 
     # Criterion setup based on selecte GAN
     # format: criterion_adversarial(arg1, arg2)
@@ -180,8 +244,8 @@ def train(args):
     train_file_list = args.train_file_list
     val_file_list = args.val_file_list
 
-    dataloader = get_dataloader(train_file_list, batch_size=args.batch_size, train=True)
-    val_loader = get_validation_dataloader(val_file_list, batch_size=args.batch_size)
+    dataloader = get_dataloader(train_file_list, batch_size=args.batch_size, train=True, target_image_size=args.target_image_size)
+    val_loader = get_validation_dataloader(val_file_list, batch_size=args.batch_size, target_image_size=args.target_image_size)
 
     # 텐서보드 설정
     writer = SummaryWriter()
@@ -368,7 +432,8 @@ def train(args):
                 'optimizer_G': optimizer_G.state_dict(),
                 'optimizer_D': optimizer_D.state_dict(),
                 'best_val_loss': best_val_loss,
-                'is_batch_normalization': args.is_batch_normalization
+                'is_batch_normalization': args.is_batch_normalization,
+                'backbone_architecture': args.architecture
             }, checkpoint_path)
             print(f"Epoch [{epoch+1}/{args.epochs}] - Validation loss: {val_loss:.4f}. model saved.")
         else:
@@ -376,12 +441,53 @@ def train(args):
 
         # 생성된 이미지 텐서보드에 기록
         with torch.no_grad():
-            num_samples = min(16, img.size(0))
-            sample_img = img[:num_samples]  # 첫 num_samples개 이미지
-            label_sample = label[:num_samples]
-            c_z_sample = E_G(sample_img)
-            c_s_sample = E_F(sample_img)
+            E_G.use_checkpoint = True
+            E_F.use_checkpoint = True
+            D_G.use_checkpoint = True
+            D_F.use_checkpoint = True
+            D_J.use_checkpoint = True
 
+            num_samples = 16  # 생성할 총 샘플 수
+            batch_size = 2    # 한 번에 처리할 샘플 수
+            collected_imgs = []
+            collected_labels = []
+            collected_c_z = []
+            collected_c_s = []
+
+            data_iter = iter(val_loader)  # 검증 데이터 로더의 이터레이터 생성
+
+            while len(collected_imgs) < num_samples:
+                try:
+                    # 다음 배치를 가져옴
+                    img_batch, label_batch = next(data_iter)
+                except StopIteration:
+                    # 이터레이터가 끝나면 다시 시작
+                    data_iter = iter(val_loader)
+                    img_batch, label_batch = next(data_iter)
+
+                img_batch = img_batch.to(device)
+                label_batch = label_batch.to(device)
+
+                # 모델의 출력 계산
+                c_z_batch = E_G(img_batch)
+                c_s_batch = E_F(img_batch)
+
+                # 필요한 만큼의 샘플을 수집
+                remaining = num_samples - len(collected_imgs)
+                batch_take = min(remaining, batch_size)
+
+                for i in range(0, img_batch.size(0), batch_take):
+                    collected_imgs.append(img_batch[i:i+batch_take])
+                    collected_labels.append(label_batch[i:i+batch_take])
+                    collected_c_z.append(c_z_batch[i:i+batch_take])
+                    collected_c_s.append(c_s_batch[i:i+batch_take])
+                    # 수집된 텐서들을 하나로 연결
+                    sample_img = torch.cat(collected_imgs, dim=0)
+                    label_sample = torch.cat(collected_labels, dim=0)
+                    c_z_sample = torch.cat(collected_c_z, dim=0)
+                    c_s_sample = torch.cat(collected_c_s, dim=0)
+
+            # 디코더를 통해 이미지 생성
             y_prime_sample = D_G(c_z_sample)          # y': syn. normal image
             a_sample = D_F(c_s_sample)                # a: residual map
             z_double_prime_sample = y_prime_sample + a_sample  # z'': reconstructed image 2
@@ -422,6 +528,13 @@ if __name__ == "__main__":
     ### Train/val set(necessary) ###
     parser.add_argument('--train_file_list', nargs='+', required=True, help='학습용 이미지 경로 리스트 파일')
     parser.add_argument('--val_file_list', nargs='+', required=True, help='검증용 이미지 경로 리스트 파일')
+    ### Image size ###
+    parser.add_argument('--target_image_size', type=int, default=224, help="입력 이미지 사이즈. 자동으로 이 크기에 맞추어 resizing 됨")
+    ### Architecture ##
+    # unet + attention without encoder-decoder skip connection.  
+    parser.add_argument('--architecture', type=str, default='original', choices=['original', 'unet'], help='Select backbone architecture to train.')
+    ### Gradient Checkpointing 옵션 ###
+    parser.add_argument('--use_checkpoint', action='store_true', help='Gradient Checkpointing 사용 여부')
     ### Save options ###
     parser.add_argument('--always_save_checkpoint', action='store_true', help='Always save a checkpoint after each eval0')
     parser.add_argument('--checkpoint_dir', type=str, default='./chkpts', help='체크포인트 저장 디렉토리')
