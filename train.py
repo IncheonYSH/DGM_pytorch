@@ -17,8 +17,8 @@ import torch.nn.functional as F
 from torch.autograd import grad
 from torch.cuda.amp import GradScaler, autocast
 import os
-os.environ["NUMEXPR_MAX_THREADS"] = "24"
-torch.set_num_threads(24)
+# os.environ["NUMEXPR_MAX_THREADS"] = "24"
+# torch.set_num_threads(24)
 
 
 # Logging 설정
@@ -162,7 +162,7 @@ def train(args):
                         model_channels=64,
                         channel_mult=(1, 2, 4, 8),
                         num_res_blocks=4,
-                        attention_resolutions=(32, 16, 8),
+                        attention_resolutions=(),
                         num_heads=1,
                         num_head_channels=-1,
                         use_checkpoint=args.use_checkpoint,
@@ -172,7 +172,7 @@ def train(args):
                         model_channels=64,
                         channel_mult=(1, 2, 4, 8),
                         num_res_blocks=4,
-                        attention_resolutions=(32, 16, 8),
+                        attention_resolutions=(),
                         num_heads=1,
                         num_head_channels=-1,
                         use_checkpoint=args.use_checkpoint,
@@ -441,62 +441,81 @@ def train(args):
 
         # 생성된 이미지 텐서보드에 기록
         with torch.no_grad():
-            E_G.use_checkpoint = True
-            E_F.use_checkpoint = True
-            D_G.use_checkpoint = True
-            D_F.use_checkpoint = True
-            D_J.use_checkpoint = True
-
-            num_samples = 16  # 생성할 총 샘플 수
-            batch_size = 2    # 한 번에 처리할 샘플 수
+            num_samples = 16            # 총 4x4 그리드 크기 (16개 이미지)
+            disp_batch_size = 1         # 한 번에 처리할 샘플 수 (작은 배치 크기)
+            skip_batches= 5
             collected_imgs = []
             collected_labels = []
-            collected_c_z = []
-            collected_c_s = []
+            collected_y_prime = []
+            collected_a = []
+            collected_z_double_prime = []
+            collected_z_prime = []
 
             data_iter = iter(val_loader)  # 검증 데이터 로더의 이터레이터 생성
 
+            # 초기 배치 건너뛰기
+            for _ in range(skip_batches):
+                try:
+                    next(data_iter)
+                except StopIteration:
+                    # 이터레이터가 끝나면 다시 시작
+                    data_iter = iter(val_loader)
+                    next(data_iter)
+
             while len(collected_imgs) < num_samples:
                 try:
-                    # 다음 배치를 가져옴
+                    # disp_batch_size에 맞게 배치 가져오기
                     img_batch, label_batch = next(data_iter)
+                    
+                    # disp_batch_size만큼만 사용하도록 수정
+                    img_batch = img_batch[:disp_batch_size]
+                    label_batch = label_batch[:disp_batch_size]
+
                 except StopIteration:
                     # 이터레이터가 끝나면 다시 시작
                     data_iter = iter(val_loader)
                     img_batch, label_batch = next(data_iter)
+                    img_batch = img_batch[:disp_batch_size]
+                    label_batch = label_batch[:disp_batch_size]
 
                 img_batch = img_batch.to(device)
                 label_batch = label_batch.to(device)
 
-                # 모델의 출력 계산
-                c_z_batch = E_G(img_batch)
-                c_s_batch = E_F(img_batch)
+                # 모델의 출력 계산 (disp_batch_size 기준으로 작동)
+                c_z_batch = E_G(img_batch)  # E_G 네트워크로 c_z 계산
+                c_s_batch = E_F(img_batch)  # E_F 네트워크로 c_s 계산
+
+                # 디코더를 통해 disp_batch_size 기준으로 이미지 생성
+                y_prime_batch = D_G(c_z_batch)                 # y': syn. normal image
+                a_batch = D_F(c_s_batch)                       # a: residual map
+                z_double_prime_batch = y_prime_batch + a_batch  # z'': reconstructed image 2
+                z_prime_batch = D_J(torch.cat([c_z_batch, c_s_batch], dim=1))  # z': reconstructed image 1
 
                 # 필요한 만큼의 샘플을 수집
                 remaining = num_samples - len(collected_imgs)
-                batch_take = min(remaining, batch_size)
+                batch_take = min(remaining, disp_batch_size)  # disp_batch_size와 관련된 조건
 
-                for i in range(0, img_batch.size(0), batch_take):
-                    collected_imgs.append(img_batch[i:i+batch_take])
-                    collected_labels.append(label_batch[i:i+batch_take])
-                    collected_c_z.append(c_z_batch[i:i+batch_take])
-                    collected_c_s.append(c_s_batch[i:i+batch_take])
-                    # 수집된 텐서들을 하나로 연결
-                    sample_img = torch.cat(collected_imgs, dim=0)
-                    label_sample = torch.cat(collected_labels, dim=0)
-                    c_z_sample = torch.cat(collected_c_z, dim=0)
-                    c_s_sample = torch.cat(collected_c_s, dim=0)
+                # 수집할 개수에 맞춰 필요한 샘플들을 추가
+                collected_imgs.extend(img_batch[:batch_take])
+                collected_labels.extend(label_batch[:batch_take])
+                collected_y_prime.extend(y_prime_batch[:batch_take])
+                collected_a.extend(a_batch[:batch_take])
+                collected_z_double_prime.extend(z_double_prime_batch[:batch_take])
+                collected_z_prime.extend(z_prime_batch[:batch_take])
 
-            # 디코더를 통해 이미지 생성
-            y_prime_sample = D_G(c_z_sample)          # y': syn. normal image
-            a_sample = D_F(c_s_sample)                # a: residual map
-            z_double_prime_sample = y_prime_sample + a_sample  # z'': reconstructed image 2
-            z_prime_sample = D_J(torch.cat([c_z_sample, c_s_sample], dim=1))  # z': reconstructed image 1
+            # 수집된 텐서들을 하나로 연결 (16개 이미지로 구성된 텐서)
+            sample_img = torch.stack(collected_imgs, dim=0)
+            label_sample = torch.stack(collected_labels, dim=0)
+            y_prime_sample = torch.stack(collected_y_prime, dim=0)
+            a_sample = torch.stack(collected_a, dim=0)
+            z_double_prime_sample = torch.stack(collected_z_double_prime, dim=0)
+            z_prime_sample = torch.stack(collected_z_prime, dim=0)
 
-            # 각 이미지를 그리드로 생성
+            # 4x4 그리드로 이미지 생성 함수 정의
             def make_grid(images):
                 return vutils.make_grid(images.cpu(), normalize=True, scale_each=True, nrow=4)
 
+            # 각 이미지를 4x4 그리드로 생성
             grid_original = make_grid(sample_img)
             grid_y_prime = make_grid(y_prime_sample)
             grid_a = make_grid(a_sample)
@@ -510,9 +529,10 @@ def train(args):
             writer.add_image('Recon1 (z\')', grid_z_prime, epoch)
             writer.add_image('Recon2 (z\'\')', grid_z_double_prime, epoch)
 
-            # 텐서보드에 이미지 label 같이 기록
+            # 텍스트 형식의 라벨 정보 기록
             for i in range(num_samples):
                 writer.add_text(f'Label Info/Sample {i + 1}', f"Label: {label_sample[i].item()}", epoch)
+
 
     writer.close()
 
