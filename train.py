@@ -4,7 +4,10 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 from data import get_dataloader, get_validation_dataloader
-from model import EncoderG, EncoderF, Decoder, DecoderConcat, Discriminator, NewDecoder, NewDecoderConcat, NewEncoder
+from model import EncoderG, EncoderF, Decoder, DecoderConcat, Discriminator
+from ladagan import Discriminator as LadaDiscriminator
+from ladagan import Generator as LadaGenerator
+from clip_encoder import VisionTransformer
 from torch.utils.tensorboard import SummaryWriter
 from tqdm import tqdm
 import torchvision.utils as vutils
@@ -36,6 +39,7 @@ def log_hyperparameters(args):
     logging.info(f"Batch Size: {args.batch_size}")
     logging.info(f"Use Gradient Checkpointing: {args.use_checkpoint}")
     logging.info(f"Backbone architecture: {args.architecture}")
+    logging.info(f"Latent space dimension: {args.z_dimension}")
     logging.info(f"GAN type: {args.base_GAN}")
     logging.info(f"Target image size: {args.target_image_size}")
     logging.info(f"Generator Initial Learning Rate: {args.initial_lr_g}")
@@ -113,10 +117,7 @@ def train(args):
     print("PyTorch version:", torch.__version__)
     print("CUDA available:", torch.cuda.is_available())
     print("CUDA version:", torch.version.cuda)
-
     log_hyperparameters(args)
-
-
 
     # 로드 옵션
     start_epoch = 0
@@ -157,57 +158,50 @@ def train(args):
         D_J = DecoderConcat().to(device)
         D_Disc = Discriminator(is_batch_normalization=args.is_batch_normalization).to(device)
     else:
-        E_G = NewEncoder(
-                        in_channels=1,
-                        model_channels=64,
-                        channel_mult=(1, 2, 4, 8),
-                        num_res_blocks=4,
-                        attention_resolutions=(),
-                        num_heads=1,
-                        num_head_channels=-1,
-                        use_checkpoint=args.use_checkpoint,
-                    ).to(device)
-        E_F = NewEncoder(
-                        in_channels=1,
-                        model_channels=64,
-                        channel_mult=(1, 2, 4, 8),
-                        num_res_blocks=4,
-                        attention_resolutions=(),
-                        num_heads=1,
-                        num_head_channels=-1,
-                        use_checkpoint=args.use_checkpoint,
-                    ).to(device)
-        D_G = NewDecoder(
-                        out_channels=1,
-                        model_channels=64,
-                        channel_mult=(8, 4, 2, 1),
-                        num_res_blocks=4,
-                        attention_resolutions=(32, 16, 8),
-                        num_heads=1,
-                        num_head_channels=-1,
-                        use_checkpoint=args.use_checkpoint,
-                    ).to(device)
-        D_F = NewDecoder(
-                        out_channels=1,
-                        model_channels=64,
-                        channel_mult=(8, 4, 2, 1),
-                        num_res_blocks=4,
-                        attention_resolutions=(32, 16, 8),
-                        num_heads=1,
-                        num_head_channels=-1,
-                        use_checkpoint=args.use_checkpoint,
-                    ).to(device)
-        D_J = NewDecoderConcat(
-                        out_channels=1,
-                        model_channels=64,
-                        channel_mult=(8, 4, 2, 1),
-                        num_res_blocks=4,
-                        attention_resolutions=(32, 16, 8),
-                        num_heads=1,
-                        num_head_channels=-1,
-                        use_checkpoint=args.use_checkpoint,
-                    ).to(device)
-        D_Disc = Discriminator(is_batch_normalization=args.is_batch_normalization).to(device)
+        z_dim = args.z_dimension
+        E_G = VisionTransformer(
+            image_size=args.target_image_size,
+            patch_size=16,
+            width=512,
+            layers=12,
+            heads=8,
+            mlp_ratio=4.0,
+            output_dim=z_dim,
+            pool_type='tok',
+        ).to(device)
+        E_F = VisionTransformer(
+            image_size=args.target_image_size,
+            patch_size=16,
+            width=512,
+            layers=12,
+            heads=8,
+            mlp_ratio=4.0,
+            output_dim=z_dim,
+            pool_type='tok',
+        ).to(device)
+        D_G = LadaGenerator(
+            z_dim=z_dim,
+            img_size=args.target_image_size,
+            model_dim=[1024, 512, 256],
+            dec_dim=[32, 16, 8],
+        ).to(device)
+        D_F = LadaGenerator(
+            z_dim=z_dim,
+            img_size=args.target_image_size,
+            model_dim=[1024, 512, 256],
+            dec_dim=[32, 16, 8],
+        ).to(device)
+        D_J = LadaGenerator(
+            z_dim=z_dim*2,
+            img_size=args.target_image_size,
+            model_dim=[1024, 512, 256],
+            dec_dim=[32, 16, 8],
+        ).to(device)
+        D_Disc = LadaDiscriminator(
+            img_size=args.target_image_size,
+            enc_dim=[64, 128, 256, 512, 1024],
+            heads=4
+            ).to(device)
 
     # 옵티마이저 설정
     params = list(E_G.parameters()) + list(E_F.parameters()) + \
@@ -298,7 +292,7 @@ def train(args):
 
                 # 디코딩
                 with torch.no_grad():
-                    y_prime = D_G(c_z)
+                    y_prime, y_prime_attn = D_G(c_z)
 
                 # 판별자 손실 계산
                 D_real = D_Disc(img)
@@ -333,10 +327,10 @@ def train(args):
             c_s = E_F(img)
 
             # 디코딩
-            y_prime = D_G(c_z)
-            a = D_F(c_s)
+            y_prime, y_prime_attn = D_G(c_z)
+            a, a_attn = D_F(c_s)
             z_double_prime = y_prime + a  # z'' 재구성된 이미지 2
-            z_prime = D_J(torch.cat([c_z, c_s], dim=1))  # z' 재구성된 이미지 1
+            z_prime, z_prime_attn = D_J(torch.cat([c_z, c_s], dim=1))  # z' 재구성된 이미지 1
 
             # 생성자 손실 계산
             # reduction='mean' is applied in default
@@ -441,75 +435,17 @@ def train(args):
 
         # 생성된 이미지 텐서보드에 기록
         with torch.no_grad():
-            num_samples = 16            # 총 4x4 그리드 크기 (16개 이미지)
-            disp_batch_size = 1         # 한 번에 처리할 샘플 수 (작은 배치 크기)
-            skip_batches= 5
-            collected_imgs = []
-            collected_labels = []
-            collected_y_prime = []
-            collected_a = []
-            collected_z_double_prime = []
-            collected_z_prime = []
+            num_samples = min(16, img.size(0))
+            sample_img = img[:num_samples]  # 첫 num_samples개 이미지
+            label_sample = label[:num_samples]
+            c_z_sample = E_G(sample_img)
+            c_s_sample = E_F(sample_img)
 
-            data_iter = iter(val_loader)  # 검증 데이터 로더의 이터레이터 생성
-
-            # 초기 배치 건너뛰기
-            for _ in range(skip_batches):
-                try:
-                    next(data_iter)
-                except StopIteration:
-                    # 이터레이터가 끝나면 다시 시작
-                    data_iter = iter(val_loader)
-                    next(data_iter)
-
-            while len(collected_imgs) < num_samples:
-                try:
-                    # disp_batch_size에 맞게 배치 가져오기
-                    img_batch, label_batch = next(data_iter)
-                    
-                    # disp_batch_size만큼만 사용하도록 수정
-                    img_batch = img_batch[:disp_batch_size]
-                    label_batch = label_batch[:disp_batch_size]
-
-                except StopIteration:
-                    # 이터레이터가 끝나면 다시 시작
-                    data_iter = iter(val_loader)
-                    img_batch, label_batch = next(data_iter)
-                    img_batch = img_batch[:disp_batch_size]
-                    label_batch = label_batch[:disp_batch_size]
-
-                img_batch = img_batch.to(device)
-                label_batch = label_batch.to(device)
-
-                # 모델의 출력 계산 (disp_batch_size 기준으로 작동)
-                c_z_batch = E_G(img_batch)  # E_G 네트워크로 c_z 계산
-                c_s_batch = E_F(img_batch)  # E_F 네트워크로 c_s 계산
-
-                # 디코더를 통해 disp_batch_size 기준으로 이미지 생성
-                y_prime_batch = D_G(c_z_batch)                 # y': syn. normal image
-                a_batch = D_F(c_s_batch)                       # a: residual map
-                z_double_prime_batch = y_prime_batch + a_batch  # z'': reconstructed image 2
-                z_prime_batch = D_J(torch.cat([c_z_batch, c_s_batch], dim=1))  # z': reconstructed image 1
-
-                # 필요한 만큼의 샘플을 수집
-                remaining = num_samples - len(collected_imgs)
-                batch_take = min(remaining, disp_batch_size)  # disp_batch_size와 관련된 조건
-
-                # 수집할 개수에 맞춰 필요한 샘플들을 추가
-                collected_imgs.extend(img_batch[:batch_take])
-                collected_labels.extend(label_batch[:batch_take])
-                collected_y_prime.extend(y_prime_batch[:batch_take])
-                collected_a.extend(a_batch[:batch_take])
-                collected_z_double_prime.extend(z_double_prime_batch[:batch_take])
-                collected_z_prime.extend(z_prime_batch[:batch_take])
-
-            # 수집된 텐서들을 하나로 연결 (16개 이미지로 구성된 텐서)
-            sample_img = torch.stack(collected_imgs, dim=0)
-            label_sample = torch.stack(collected_labels, dim=0)
-            y_prime_sample = torch.stack(collected_y_prime, dim=0)
-            a_sample = torch.stack(collected_a, dim=0)
-            z_double_prime_sample = torch.stack(collected_z_double_prime, dim=0)
-            z_prime_sample = torch.stack(collected_z_prime, dim=0)
+            # 디코더를 통해 이미지 생성
+            y_prime_sample, y_prime_attn_sample = D_G(c_z_sample)          # y': syn. normal image
+            a_sample, a_attn_sample = D_F(c_s_sample)                # a: residual map
+            z_double_prime_sample = y_prime_sample + a_sample  # z'': reconstructed image 2
+            z_prime_sample, z_prime_attn_sample = D_J(torch.cat([c_z_sample, c_s_sample], dim=1))  # z': reconstructed image 1
 
             # 4x4 그리드로 이미지 생성 함수 정의
             def make_grid(images):
@@ -528,6 +464,27 @@ def train(args):
             writer.add_image('Residual (a)', grid_a, epoch)
             writer.add_image('Recon1 (z\')', grid_z_prime, epoch)
             writer.add_image('Recon2 (z\'\')', grid_z_double_prime, epoch)
+
+            # 어텐션 맵 처리 및 텐서보드에 기록
+            # 어텐션 맵은 여러 헤드를 가지므로 평균을 내서 시각화
+            def process_attention_maps(attn_maps):
+                # attn_maps: [batch_size, num_heads, H, W]
+                mean_attn = torch.mean(attn_maps, dim=1, keepdim=True)  # (batch_size, 1, H, W])
+                return mean_attn
+
+            y_prime_attn_processed = process_attention_maps(y_prime_attn_sample)
+            a_attn_processed = process_attention_maps(a_attn_sample)
+            z_prime_attn_processed = process_attention_maps(z_prime_attn_sample)
+
+            # 어텐션 맵을 그리드로 생성
+            grid_y_prime_attn = make_grid(y_prime_attn_processed)
+            grid_a_attn = make_grid(a_attn_processed)
+            grid_z_prime_attn = make_grid(z_prime_attn_processed)
+
+            # 텐서보드에 어텐션 맵 기록
+            writer.add_image('Attention Maps/Syn Normal (y\')', grid_y_prime_attn, epoch)
+            writer.add_image('Attention Maps/Residual (a)', grid_a_attn, epoch)
+            writer.add_image('Attention Maps/Recon1 (z\')', grid_z_prime_attn, epoch)
 
             # 텍스트 형식의 라벨 정보 기록
             for i in range(num_samples):
@@ -552,7 +509,8 @@ if __name__ == "__main__":
     parser.add_argument('--target_image_size', type=int, default=224, help="입력 이미지 사이즈. 자동으로 이 크기에 맞추어 resizing 됨")
     ### Architecture ##
     # unet + attention without encoder-decoder skip connection.  
-    parser.add_argument('--architecture', type=str, default='original', choices=['original', 'unet'], help='Select backbone architecture to train.')
+    parser.add_argument('--architecture', type=str, default='original', choices=['original', 'new'], help='Select backbone architecture to train.')
+    parser.add_argument('--z_dimension', type=int, default=128, help="latent space dimension")
     ### Gradient Checkpointing 옵션 ###
     parser.add_argument('--use_checkpoint', action='store_true', help='Gradient Checkpointing 사용 여부')
     ### Save options ###
