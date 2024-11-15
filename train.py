@@ -90,8 +90,8 @@ def set_seed(seed):
     np.random.seed(seed)
     random.seed(seed)
 
-def compute_gradient_penalty(D, real_samples, fake_samples):
-    """Calculates the gradient penalty loss for WGAN GP"""
+def wgan_gp(D, real_samples, fake_samples, center = 1):
+    """Calculates the gradient penalty"""
     # Random weight term for interpolation between real and fake samples
     alpha = torch.rand(real_samples.size(0), 1, 1, 1, device=real_samples.device)
     # Get random interpolation between real and fake samples
@@ -107,8 +107,21 @@ def compute_gradient_penalty(D, real_samples, fake_samples):
         only_inputs=True,
     )[0]
     gradients = gradients.view(gradients.size(0), -1)
-    gradient_penalty = ((gradients.norm(2, dim=1) - 1) ** 2).mean()
+    gradient_penalty = ((gradients.norm(2, dim=1) - center) ** 2).mean()
     return gradient_penalty
+
+# zero-centered gradient penalty term
+# Penalize discriminator gradients on true data distribution
+def compute_grad2(d_out, x_in):
+    batch_size = x_in.size(0)
+    grad_dout = grad(
+        outputs=d_out.sum(), inputs=x_in,
+        create_graph=True, retain_graph=True, only_inputs=True
+    )[0]
+    grad_dout2 = grad_dout.pow(2)
+    assert(grad_dout2.size() == x_in.size())
+    reg = grad_dout2.view(batch_size, -1).sum(1)
+    return reg
 
 def train(args):
     device = torch.device(f"cuda:{args.gpu}" if torch.cuda.is_available() else "cpu")
@@ -219,7 +232,8 @@ def train(args):
     criterion_L1 = nn.L1Loss()
     clip_value = torch.inf
     is_clamping = False
-    is_gradient_penalty = False
+    is_wgan_penalty = False
+    is_zero_centered_penalty = False
     if args.base_GAN == 'LSGAN':
         criterion_adversarial = lambda arg1, arg2: 0.5 * F.mse_loss(arg1, arg2)
     elif args.base_GAN == 'GAN':
@@ -230,9 +244,10 @@ def train(args):
         is_clamping = True
     elif args.base_GAN == 'WGANGP':
         criterion_adversarial = lambda arg1, arg2: torch.where(arg2.view(-1)[0] == 1, -torch.mean(arg1), torch.mean(arg1))
-        is_gradient_penalty = True
-    elif args.base_GAN == 'NSGAN':
-        criterion_adversarial = lambda arg1, arg2: torch.where(arg2.view(-1)[0] == 1, torch.mean(F.softplus(-arg1)), torch.mean(arg1))
+        is_wgan_penalty = True
+    elif args.base_GAN == 'NSGAN': # not saturated + gradient penalty
+        criterion_adversarial = lambda arg1, arg2: 0.5 * F.binary_cross_entropy_with_logits(arg1, arg2) # default reduction: mean
+        is_zero_centered_penalty = True
     else:
         criterion_adversarial = None
 
@@ -292,11 +307,11 @@ def train(args):
                 c_z = E_G(img)
                 c_s = E_F(img)
 
-                # 디코딩
                 with torch.no_grad():
                     y_prime, y_prime_attn = D_G(c_z)
 
                 # 판별자 손실 계산
+                img.requires_grad_(True)
                 D_real = D_Disc(img)
                 D_fake = D_Disc(y_prime.detach())
 
@@ -306,8 +321,13 @@ def train(args):
                 loss_D = loss_D_real + loss_D_fake       
 
                 # Gradient penalty for WGAN-GP
-                if is_gradient_penalty:
-                    gradient_penalty = compute_gradient_penalty(D_Disc, img, y_prime.detach())
+                if is_wgan_penalty:
+                    gradient_penalty = wgan_gp(D_Disc, img, y_prime.detach())
+                    writer.add_scalar('Loss/Gradient penalty', gradient_penalty.item(), global_step)
+                    loss_D += lambda_GP * gradient_penalty
+                # Zero centered gradient penalty
+                if is_zero_centered_penalty:
+                    gradient_penalty = compute_grad2(D_real, img).mean()
                     writer.add_scalar('Loss/Gradient penalty', gradient_penalty.item(), global_step)
                     loss_D += lambda_GP * gradient_penalty
                 
@@ -341,7 +361,7 @@ def train(args):
             # Alternative loss function for stability in early steps of training
             # It's from vanila GAN paper. But, it is simply expanded with changes of adverserial loss function. Need experiment for this changes.
             if args.alt_loss and epoch < args.alt_loss_epochs:
-                loss_G_adv = - criterion_adversarial(D_fake, torch.zeros_like(D_fake))
+                loss_G_adv = criterion_adversarial(D_fake, torch.zeros_like(D_fake))
             else:
                 loss_G_adv = criterion_adversarial(D_fake, torch.ones_like(D_fake))
 
@@ -470,9 +490,14 @@ def train(args):
             # 어텐션 맵 처리 및 텐서보드에 기록
             # 어텐션 맵은 여러 헤드를 가지므로 평균을 내서 시각화
             def process_attention_maps(attn_maps):
-                # attn_maps: [batch_size, num_heads, H, W]
-                mean_attn = torch.mean(attn_maps, dim=1, keepdim=True)  # (batch_size, 1, H, W])
+                # Check if attn_maps is a list and stack if necessary
+                if isinstance(attn_maps, list):
+                    # Stack the list of tensors along a new dimension (e.g., dim=1)
+                    attn_maps = torch.stack(attn_maps, dim=1)  # Now attn_maps is a tensor
+                # Compute the mean across the heads
+                mean_attn = torch.mean(attn_maps, dim=1, keepdim=True)  # (batch_size, 1, H, W)
                 return mean_attn
+
 
             y_prime_attn_processed = process_attention_maps(y_prime_attn_sample)
             a_attn_processed = process_attention_maps(a_attn_sample)
