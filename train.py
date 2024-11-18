@@ -19,7 +19,7 @@ import math
 import torch.nn.functional as F
 from torch.autograd import grad
 from torch.cuda.amp import GradScaler, autocast
-import os
+from datetime import datetime
 # os.environ["NUMEXPR_MAX_THREADS"] = "24"
 # torch.set_num_threads(24)
 
@@ -132,35 +132,17 @@ def train(args):
     print("CUDA version:", torch.version.cuda)
     log_hyperparameters(args)
 
+    # 체크포인트 디렉토리 생성
+    os.makedirs(args.checkpoint_dir, exist_ok=True)
+    checkpoint_path = ""
+    if args.checkpoint_filename:
+        checkpoint_path = os.path.join(args.checkpoint_dir, args.checkpoint_filename)
+
     # 로드 옵션
     start_epoch = 0
     global_step = 0
     best_val_loss = float('inf')
     backbone_architecture = args.architecture
-    if args.continue_train:
-        if os.path.exists(checkpoint_path):
-            checkpoint = torch.load(checkpoint_path)
-            E_G.load_state_dict(checkpoint['E_G'])
-            E_F.load_state_dict(checkpoint['E_F'])
-            D_G.load_state_dict(checkpoint['D_G'])
-            D_F.load_state_dict(checkpoint['D_F'])
-            D_J.load_state_dict(checkpoint['D_J'])
-            # Discriminator setup
-            checkpoint_is_batch_normalization = checkpoint.get('is_batch_normalization', args.is_batch_normalization)
-            D_Disc = Discriminator(is_batch_normalization=checkpoint_is_batch_normalization).to(device)
-            D_Disc.load_state_dict(checkpoint['D_Disc'])
-            optimizer_G.load_state_dict(checkpoint['optimizer_G'])
-            optimizer_D.load_state_dict(checkpoint['optimizer_D'])
-            completed_epoch = checkpoint['epoch']
-            start_epoch = completed_epoch + 1
-            best_val_loss = checkpoint.get('best_val_loss', float('inf'))
-            global_step = checkpoint.get('global_step', completed_epoch * len(dataloader))
-            backbone_architecture = checkpoint.get('backbone_architecture')
-            print(f"체크포인트 '{checkpoint_path}'에서 로드하였습니다. 재개 에포크: {start_epoch}")
-        else:
-            print(f"체크포인트 '{checkpoint_path}'가 존재하지 않습니다. 새로 학습을 시작합니다.")
-    else:
-        print("새로 학습을 시작합니다.")
 
     # 모델 초기화
     if backbone_architecture == 'original':
@@ -223,9 +205,6 @@ def train(args):
     optimizer_G = optim.Adam(params, lr=args.initial_lr_g, betas=(args.beta_1, args.beta_2), weight_decay=args.weight_decay)
     optimizer_D = optim.Adam(D_Disc.parameters(), lr=args.initial_lr_d, betas=(args.beta_1, args.beta_2))
 
-    # 체크포인트 디렉토리 생성
-    os.makedirs(args.checkpoint_dir, exist_ok=True)
-    checkpoint_path = os.path.join(args.checkpoint_dir, 'checkpoint.pth')
 
     # Criterion setup based on selecte GAN
     # format: criterion_adversarial(arg1, arg2)
@@ -235,9 +214,9 @@ def train(args):
     is_wgan_penalty = False
     is_zero_centered_penalty = False
     if args.base_GAN == 'LSGAN':
-        criterion_adversarial = lambda arg1, arg2: 0.5 * F.mse_loss(arg1, arg2)
+        criterion_adversarial = lambda arg1, arg2: F.mse_loss(arg1, arg2)
     elif args.base_GAN == 'GAN':
-        criterion_adversarial = lambda arg1, arg2: 0.5 * F.binary_cross_entropy(torch.sigmoid(arg1), arg2)
+        criterion_adversarial = lambda arg1, arg2: F.binary_cross_entropy(torch.sigmoid(arg1), arg2)
     elif args.base_GAN == 'WGAN':
         criterion_adversarial = lambda arg1, arg2: torch.where(arg2.view(-1)[0] == 1, -torch.mean(arg1), torch.mean(arg1))
         clip_value = args.clip_value
@@ -246,7 +225,7 @@ def train(args):
         criterion_adversarial = lambda arg1, arg2: torch.where(arg2.view(-1)[0] == 1, -torch.mean(arg1), torch.mean(arg1))
         is_wgan_penalty = True
     elif args.base_GAN == 'NSGAN': # not saturated + gradient penalty
-        criterion_adversarial = lambda arg1, arg2: 0.5 * F.binary_cross_entropy_with_logits(arg1, arg2) # default reduction: mean
+        criterion_adversarial = lambda arg1, arg2: F.binary_cross_entropy_with_logits(arg1, arg2) # default reduction: mean
         is_zero_centered_penalty = True
     else:
         criterion_adversarial = None
@@ -268,6 +247,32 @@ def train(args):
     lambda_GP = args.lambda_GP
     warmup_iters = args.warmup_iters
     lr_decay_iters = args.lr_decay_iters
+
+                
+    if args.continue_train:
+        if os.path.exists(checkpoint_path):
+            checkpoint = torch.load(checkpoint_path)
+            E_G.load_state_dict(checkpoint['E_G'])
+            E_F.load_state_dict(checkpoint['E_F'])
+            D_G.load_state_dict(checkpoint['D_G'])
+            D_F.load_state_dict(checkpoint['D_F'])
+            D_J.load_state_dict(checkpoint['D_J'])
+            # Discriminator setup
+            D_Disc.load_state_dict(checkpoint['D_Disc'])
+            optimizer_G.load_state_dict(checkpoint['optimizer_G'])
+            optimizer_D.load_state_dict(checkpoint['optimizer_D'])
+            completed_epoch = checkpoint['epoch']
+            start_epoch = completed_epoch + 1
+            best_val_loss = checkpoint.get('best_val_loss', float('inf'))
+            global_step = checkpoint.get('global_step', completed_epoch * len(dataloader))
+            backbone_architecture = checkpoint.get('backbone_architecture')
+            print(f"체크포인트 '{checkpoint_path}'에서 로드하였습니다. 재개 에포크: {start_epoch}")
+        else:
+            print(f"체크포인트 '{checkpoint_path}'가 존재하지 않습니다. 새로 학습을 시작합니다.")
+            current_time = datetime.now().strftime('%y%m%d%H%M%S')
+            checkpoint_path = os.path.join(args.checkpoint_dir, f'checkpoint{current_time}.pth')
+    else:
+        print("새로 학습을 시작합니다.")
 
     for epoch in range(start_epoch, args.epochs):
         E_G.train()
@@ -318,17 +323,19 @@ def train(args):
                 # Loss calculation for discriminator
                 loss_D_real = criterion_adversarial(D_real, torch.ones_like(D_real))
                 loss_D_fake = criterion_adversarial(D_fake, torch.zeros_like(D_fake))
-                loss_D = loss_D_real + loss_D_fake       
+                loss_D = 0.5 * (loss_D_real + loss_D_fake)
+                writer.add_scalar('Loss_D/D-real', loss_D_real.item(), global_step)
+                writer.add_scalar('Loss_D/D-fake', loss_D_fake.item(), global_step)
 
                 # Gradient penalty for WGAN-GP
                 if is_wgan_penalty:
                     gradient_penalty = wgan_gp(D_Disc, img, y_prime.detach())
-                    writer.add_scalar('Loss/Gradient penalty', gradient_penalty.item(), global_step)
+                    writer.add_scalar('Loss_D/Gradient penalty', gradient_penalty.item(), global_step)
                     loss_D += lambda_GP * gradient_penalty
                 # Zero centered gradient penalty
                 if is_zero_centered_penalty:
                     gradient_penalty = compute_grad2(D_real, img).mean()
-                    writer.add_scalar('Loss/Gradient penalty', gradient_penalty.item(), global_step)
+                    writer.add_scalar('Loss_D/Gradient penalty', gradient_penalty.item(), global_step)
                     loss_D += lambda_GP * gradient_penalty
                 
                 loss_D.backward()
@@ -489,29 +496,26 @@ def train(args):
 
             # 어텐션 맵 처리 및 텐서보드에 기록
             # 어텐션 맵은 여러 헤드를 가지므로 평균을 내서 시각화
-            def process_attention_maps(attn_maps):
-                # Check if attn_maps is a list and stack if necessary
-                if isinstance(attn_maps, list):
-                    # Stack the list of tensors along a new dimension (e.g., dim=1)
-                    attn_maps = torch.stack(attn_maps, dim=1)  # Now attn_maps is a tensor
-                # Compute the mean across the heads
-                mean_attn = torch.mean(attn_maps, dim=1, keepdim=True)  # (batch_size, 1, H, W)
+            def process_attention_map(attn_map):
+                # attn_map: (batch_size, num_heads, N)
+                N = attn_map.size(-1)
+                sqrt_N = int(N ** 0.5)
+                if sqrt_N * sqrt_N != N:
+                    raise ValueError("Attention map size is not a perfect square")
+                attn_map = attn_map.view(attn_map.size(0), attn_map.size(1), sqrt_N, sqrt_N)
+                mean_attn = torch.mean(attn_map, dim=1, keepdim=True)  # (batch_size, 1, H, W)
+                mean_attn = F.interpolate(mean_attn, size=(args.target_image_size, args.target_image_size), mode='nearest', align_corners=False)
                 return mean_attn
+            
+            def process_and_log_attention_maps(attn_maps, title):
+                for idx, attn_map in enumerate(attn_maps):
+                    mean_attn = process_attention_map(attn_map)
+                    grid_attn = make_grid(mean_attn)
+                    writer.add_image(f'Attention Maps/{title} Layer {idx+1}', grid_attn, epoch)
 
-
-            y_prime_attn_processed = process_attention_maps(y_prime_attn_sample)
-            a_attn_processed = process_attention_maps(a_attn_sample)
-            z_prime_attn_processed = process_attention_maps(z_prime_attn_sample)
-
-            # 어텐션 맵을 그리드로 생성
-            grid_y_prime_attn = make_grid(y_prime_attn_processed)
-            grid_a_attn = make_grid(a_attn_processed)
-            grid_z_prime_attn = make_grid(z_prime_attn_processed)
-
-            # 텐서보드에 어텐션 맵 기록
-            writer.add_image('Attention Maps/Syn Normal (y\')', grid_y_prime_attn, epoch)
-            writer.add_image('Attention Maps/Residual (a)', grid_a_attn, epoch)
-            writer.add_image('Attention Maps/Recon1 (z\')', grid_z_prime_attn, epoch)
+            process_and_log_attention_maps(y_prime_attn_sample, 'Syn Normal (y\')')
+            process_and_log_attention_maps(a_attn_sample, 'Residual (a)')
+            process_and_log_attention_maps(z_prime_attn_sample, 'Recon1 (z\')')
 
             # 텍스트 형식의 라벨 정보 기록
             for i in range(num_samples):
@@ -543,6 +547,7 @@ if __name__ == "__main__":
     ### Save options ###
     parser.add_argument('--always_save_checkpoint', action='store_true', help='Always save a checkpoint after each eval0')
     parser.add_argument('--checkpoint_dir', type=str, default='./chkpts', help='체크포인트 저장 디렉토리')
+    parser.add_argument('--checkpoint_filename', type=str, help='체크포인트 파일명')
     ### Continue train ###
     parser.add_argument('--continue_train', action='store_true', help='계속 학습 여부')
     ### GPU ###
