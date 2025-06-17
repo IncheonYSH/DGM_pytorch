@@ -3,6 +3,9 @@ import pandas as pd
 import logging
 import argparse
 from pathlib import Path
+import torch
+import torch.nn as nn
+from transformers import BertTokenizer, BertModel
 
 def setup_logger(output_path):
     # 로그 파일을 저장할 디렉토리가 없으면 생성
@@ -31,6 +34,82 @@ def setup_logger(output_path):
         file_formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
         file_handler.setFormatter(file_formatter)
         logger.addHandler(file_handler)
+
+
+class bert_labeler(nn.Module):
+    """Minimal CheXbert model definition."""
+    def __init__(self, p=0.1, clinical=False, freeze_embeddings=False, pretrain_path=None):
+        super(bert_labeler, self).__init__()
+        if pretrain_path is not None:
+            self.bert = BertModel.from_pretrained(pretrain_path)
+        elif clinical:
+            self.bert = BertModel.from_pretrained("bert-base-uncased")
+        else:
+            self.bert = BertModel.from_pretrained("bert-base-uncased")
+
+        if freeze_embeddings:
+            for param in self.bert.embeddings.parameters():
+                param.requires_grad = False
+
+        self.dropout = nn.Dropout(p)
+        hidden_size = self.bert.pooler.dense.in_features
+
+        self.linear_heads = nn.ModuleList([nn.Linear(hidden_size, 4, bias=True) for _ in range(13)])
+        self.linear_heads.append(nn.Linear(hidden_size, 2, bias=True))
+
+    def forward(self, input_ids, attention_mask):
+        final_hidden = self.bert(input_ids, attention_mask=attention_mask)[0]
+        cls_hidden = final_hidden[:, 0, :]
+        cls_hidden = self.dropout(cls_hidden)
+        out = []
+        for i in range(14):
+            out.append(self.linear_heads[i](cls_hidden))
+        return out
+
+
+def load_chexbert_model_and_tokenizer(checkpoint_path, device="cpu"):
+    model = bert_labeler()
+    checkpoint = torch.load(checkpoint_path, map_location=device)
+    if "model_state_dict" in checkpoint:
+        state_dict = checkpoint["model_state_dict"]
+    else:
+        state_dict = checkpoint
+
+    new_state_dict = {}
+    for k, v in state_dict.items():
+        if k.startswith("module."):
+            new_state_dict[k[len("module."):]] = v
+        else:
+            new_state_dict[k] = v
+    model.load_state_dict(new_state_dict, strict=False)
+    model.eval()
+    model.to(device)
+    tokenizer = BertTokenizer.from_pretrained("bert-base-uncased")
+    return model, tokenizer
+
+
+@torch.no_grad()
+def get_chexbert_predictions(text, model, tokenizer, device="cpu"):
+    text = text.strip()
+    if not text:
+        return None
+    inputs = tokenizer(text, max_length=512, truncation=True, padding='max_length', return_tensors='pt').to(device)
+    outputs = model(inputs["input_ids"], attention_mask=inputs["attention_mask"])
+    preds = []
+    for logits in outputs:
+        preds.append(torch.argmax(logits, dim=1).item())
+    return preds
+
+
+def chexbert_label_to_binary(preds):
+    """Return 0 for normal and 1 for abnormal based on CheXbert predictions."""
+    if preds is None:
+        return None
+    no_finding_present = (preds[13] == 1)
+    other_present = any(p == 1 for p in preds[:13])
+    if no_finding_present and not other_present:
+        return 0
+    return 1
 
 def generate_split_files(base_path, csv_file, output_path):
     # 로거 설정
@@ -286,6 +365,51 @@ def process_labels(pa_label_file, label_csv_file, output_file):
     logging.info(f"최종 결과를 {output_file}에 저장하였습니다.")
 
 
+def filter_with_mimic_forced_generation(label_file, mimic_csv_file, output_file, chexbert_ckpt, device="cpu"):
+    """Filter labeled data with additional conditions from mimic_forced_generation."""
+    mimic_df = pd.read_csv(mimic_csv_file)
+    mimic_df['subject_id'] = mimic_df['subject_id'].astype(str)
+    mimic_df['study_id'] = mimic_df['study_id'].astype(str)
+
+    mimic_df = mimic_df[(mimic_df['has_findings'] == 1) & (mimic_df['has_impression'] == 1)]
+
+    chex_model, chex_tokenizer = load_chexbert_model_and_tokenizer(chexbert_ckpt, device=device)
+
+    label_dict = {}
+    for _, row in mimic_df.iterrows():
+        preds_find = get_chexbert_predictions(str(row['findings']), chex_model, chex_tokenizer, device=device)
+        preds_imp = get_chexbert_predictions(str(row['impression']), chex_model, chex_tokenizer, device=device)
+        if preds_find is None or preds_imp is None:
+            continue
+        if preds_find == preds_imp:
+            label = chexbert_label_to_binary(preds_imp)
+            if label is not None:
+                label_dict[(row['subject_id'], row['study_id'])] = label
+
+    with open(label_file, 'r') as f:
+        lines = [line.strip() for line in f.readlines() if line.strip()]
+
+    out_lines = []
+    for line in lines:
+        try:
+            img_path, _ = line.split(',')
+            img_path = img_path.strip()
+        except ValueError:
+            continue
+        subj_id, study_id = extract_ids_from_path(img_path)
+        if subj_id is None or study_id is None:
+            continue
+        key = (subj_id, study_id)
+        if key in label_dict:
+            out_lines.append(f"{img_path}, {label_dict[key]}")
+
+    with open(output_file, 'w') as f:
+        for line in out_lines:
+            f.write(line + '\n')
+
+    logging.info(f"Filtered {len(out_lines)} entries saved to {output_file}.")
+
+
 """
 python data_preprocess_all.py \
     --base_path /data/mimic-cxr-jpg/files \
@@ -301,6 +425,9 @@ if __name__ == "__main__":
     parser.add_argument('--split_csv_file', type=str, required=True, help='split 정보가 포함된 CSV 파일 경로입니다.')
     parser.add_argument('--label_csv_file', type=str, required=True, help='라벨링된 CSV 파일 경로입니다.')
     parser.add_argument('--output_path', type=str, required=True, help='결과 파일들이 저장될 디렉토리 경로입니다.')
+    parser.add_argument('--mimic_csv', type=str, default=None, help='mimic_forced_generation CSV 파일 경로')
+    parser.add_argument('--chexbert_ckpt', type=str, default=None, help='CheXbert checkpoint 경로')
+    parser.add_argument('--device', type=str, default='cpu', help='CheXbert 실행 장치(cpu, cuda 등)')
 
     args = parser.parse_args()
 
@@ -344,3 +471,27 @@ if __name__ == "__main__":
         args.label_csv_file,
         os.path.join(args.output_path, 'labeled_test_sd.txt')
     )
+
+    # Step 5: filter with mimic_forced_generation if provided
+    if args.mimic_csv and args.chexbert_ckpt:
+        filter_with_mimic_forced_generation(
+            os.path.join(args.output_path, 'labeled_train_sd.txt'),
+            args.mimic_csv,
+            os.path.join(args.output_path, 'filtered_labeled_train_sd.txt'),
+            args.chexbert_ckpt,
+            device=args.device
+        )
+        filter_with_mimic_forced_generation(
+            os.path.join(args.output_path, 'labeled_validation_sd.txt'),
+            args.mimic_csv,
+            os.path.join(args.output_path, 'filtered_labeled_validation_sd.txt'),
+            args.chexbert_ckpt,
+            device=args.device
+        )
+        filter_with_mimic_forced_generation(
+            os.path.join(args.output_path, 'labeled_test_sd.txt'),
+            args.mimic_csv,
+            os.path.join(args.output_path, 'filtered_labeled_test_sd.txt'),
+            args.chexbert_ckpt,
+            device=args.device
+        )
