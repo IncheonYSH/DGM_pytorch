@@ -11,19 +11,26 @@ def setup_logger(output_path):
     
     # 로깅 설정
     log_file = os.path.join(output_path, 'split_generation.log')
-    logging.basicConfig(
-        filename=log_file,
-        filemode='w',  # 'w' 모드로 설정하여 파일을 덮어씀
-        level=logging.INFO,  # 로그 레벨을 INFO로 설정
-        format='%(asctime)s - %(levelname)s - %(message)s',  # 로그 포맷 지정
-    )
     
-    # 콘솔에도 로그를 출력하도록 설정
-    # console = logging.StreamHandler()
-    # console.setLevel(logging.INFO)
-    # formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
-    # console.setFormatter(formatter)
-    # logging.getLogger('').addHandler(console)
+    # 루트 로거 가져오기
+    logger = logging.getLogger()
+    logger.setLevel(logging.INFO)
+    
+    # 핸들러가 이미 설정되어 있지 않은 경우에만 추가
+    if not logger.handlers:
+        # 콘솔 핸들러 설정
+        console_handler = logging.StreamHandler()
+        console_handler.setLevel(logging.INFO)
+        console_formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
+        console_handler.setFormatter(console_formatter)
+        logger.addHandler(console_handler)
+        
+        # 파일 핸들러 설정
+        file_handler = logging.FileHandler(log_file, mode='w')
+        file_handler.setLevel(logging.INFO)
+        file_formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
+        file_handler.setFormatter(file_formatter)
+        logger.addHandler(file_handler)
 
 def generate_split_files(base_path, csv_file, output_path):
     # 로거 설정
@@ -75,13 +82,31 @@ def generate_split_files(base_path, csv_file, output_path):
 
     logging.info("파일 처리 완료. Train, validation, test 파일 저장 위치: %s", output_path)
 
-def generate_pa_split_files(base_path, csv_file, output_path):
-    # 로거 설정
-    setup_logger(output_path)
+def generate_pa_split_files(base_path, metadata_csv_file, split_csv_file, output_path):
+    # Metadata CSV 파일 읽기
+    logging.info("Metadata CSV 파일 읽는 중: %s", metadata_csv_file)
+    df_metadata = pd.read_csv(metadata_csv_file)
     
-    # CSV 파일 읽기
-    logging.info("CSV 파일 읽는 중: %s", csv_file)
-    df = pd.read_csv(csv_file)
+    # Split CSV 파일 읽기
+    logging.info("Split CSV 파일 읽는 중: %s", split_csv_file)
+    df_split = pd.read_csv(split_csv_file)
+    
+    # 'ViewPosition'이 'PA'인 데이터만 선택
+    df_pa = df_metadata[df_metadata['ViewPosition'] == 'PA']
+    logging.info("PA 이미지 개수: %d", len(df_pa))
+    
+    # 병합 키 컬럼을 문자열로 변환
+    merge_keys = ['dicom_id', 'subject_id', 'study_id']
+    for key in merge_keys:
+        df_pa[key] = df_pa[key].astype(str)
+        df_split[key] = df_split[key].astype(str)
+    
+    # df_pa와 df_split를 병합
+    df_merged = pd.merge(df_pa, df_split, on=merge_keys, how='inner')
+    logging.info("병합 후 데이터 개수: %d", len(df_merged))
+    
+    if df_merged.empty:
+        logging.warning("병합 결과가 비어 있습니다. 조건을 확인하세요.")
     
     # 출력 경로가 존재하지 않으면 생성
     if not os.path.exists(output_path):
@@ -93,16 +118,18 @@ def generate_pa_split_files(base_path, csv_file, output_path):
     test_file = open(os.path.join(output_path, 'pa_test.txt'), 'w')
     
     logging.info("PA Train, validation, test 파일 생성 완료.")
-
-    # CSV 파일의 각 행에 대해 파일 경로를 만듦
-    for index, row in df.iterrows():
+    
+    # 각 행에 대해 파일 경로를 만듦
+    for index, row in df_merged.iterrows():
         dicom_id = row['dicom_id']
         subject_id = row['subject_id']
         study_id = row['study_id']
         split = row['split']
         
-        # 주어진 포맷에 맞게 경로 구성 (여기서는 base_path 아래 subject_id 폴더에 dicom_id.jpg 파일이 있다고 가정)
-        file_path = os.path.join(base_path, str(subject_id), f"{dicom_id}.jpg")
+        # 파일 경로 구성 (generate_split_files 함수와 동일하게 수정)
+        subject_folder = f"p{str(subject_id)[:2]}/p{subject_id}"
+        study_folder = f"s{study_id}"
+        file_path = os.path.join(base_path, subject_folder, study_folder, f"{dicom_id}.jpg")
         
         # 파일 경로가 실제로 존재하는지 확인하고 split에 맞게 txt 파일에 경로 추가
         if os.path.exists(file_path):
@@ -113,6 +140,8 @@ def generate_pa_split_files(base_path, csv_file, output_path):
                 val_file.write(file_path + '\n')
             elif split == 'test':
                 test_file.write(file_path + '\n')
+            else:
+                logging.warning(f"알 수 없는 split 값 '{split}' (파일: {file_path})")
         else:
             logging.warning(f"경로가 존재하지 않습니다: {file_path}")
     
@@ -120,7 +149,7 @@ def generate_pa_split_files(base_path, csv_file, output_path):
     train_file.close()
     val_file.close()
     test_file.close()
-
+    
     logging.info("파일 처리 완료. PA Train, validation, test 파일 저장 위치: %s", output_path)
 
 def process_pa_labels(pa_file, mimic_file, output_file):
@@ -172,7 +201,7 @@ def get_label_from_row(row):
     # 라벨링 규칙에 따라 이미지의 라벨을 결정
     # Support Devices는 무시
     no_finding = row.get('No Finding', None)
-    findings_to_drop = ['subject_id', 'study_id', 'No Finding', 'Support Devices']
+    findings_to_drop = ['subject_id', 'study_id', 'No Finding'] # Support device -> abnormal image
     findings_columns = [col for col in row.index if col not in findings_to_drop]
     other_findings = row[findings_columns].values
     
@@ -259,27 +288,28 @@ def process_labels(pa_label_file, label_csv_file, output_file):
 
 """
 python data_preprocess_all.py \
-    --base_path /data3/physionet.org/files/mimic-cxr-jpg/2.1.0/files \
-    --pa_base_path /data3/physionet.org/pa_filter/pa_filtered_images \
-    --csv_file /data3/physionet.org/files/mimic-cxr-jpg/2.1.0/files/mimic-cxr-2.0.0-split.csv \
-    --label_csv_file /data3/physionet.org/files/mimic-cxr-jpg/2.1.0/files/mimic-cxr-2.0.0-chexpert.csv \
-    --output_path ./data_test
+    --base_path /data/mimic-cxr-jpg/files \
+    --metadata_csv_file  /data/mimic-cxr-jpg/mimic-cxr-2.0.0-metadata.csv \
+    --split_csv_file /data/mimic-cxr-jpg/mimic-cxr-2.0.0-split.csv \
+    --label_csv_file /data/mimic-cxr-jpg/mimic-cxr-2.0.0-chexpert.csv \
+    --output_path ./data
 """
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="전체 파이프라인을 실행하는 스크립트입니다.")
     parser.add_argument('--base_path', type=str, required=True, help='이미지가 저장된 기본 디렉토리 경로입니다.')
-    parser.add_argument('--pa_base_path', type=str, required=True, help='PA 이미지를 위한 기본 디렉토리 경로입니다.')
-    parser.add_argument('--csv_file', type=str, required=True, help='split 정보가 포함된 CSV 파일 경로입니다.')
+    parser.add_argument('--metadata_csv_file', type=str, required=True, help='PA 이미지를 위한 기본 디렉토리 경로입니다.')
+    parser.add_argument('--split_csv_file', type=str, required=True, help='split 정보가 포함된 CSV 파일 경로입니다.')
     parser.add_argument('--label_csv_file', type=str, required=True, help='라벨링된 CSV 파일 경로입니다.')
     parser.add_argument('--output_path', type=str, required=True, help='결과 파일들이 저장될 디렉토리 경로입니다.')
 
     args = parser.parse_args()
 
+    setup_logger(args.output_path)
     # Step 1: train.txt, validation.txt, test.txt 생성
-    generate_split_files(args.base_path, args.csv_file, args.output_path)
+    generate_split_files(args.base_path, args.split_csv_file, args.output_path)
 
     # Step 2: pa_train.txt, pa_validation.txt, pa_test.txt 생성
-    generate_pa_split_files(args.pa_base_path, args.csv_file, args.output_path)
+    generate_pa_split_files(args.base_path, args.metadata_csv_file, args.split_csv_file, args.output_path)
 
     # Step 3: pa_label_train.txt, pa_label_validation.txt, pa_label_test.txt 생성
     process_pa_labels(
@@ -302,15 +332,15 @@ if __name__ == "__main__":
     process_labels(
         os.path.join(args.output_path, 'pa_label_train.txt'),
         args.label_csv_file,
-        os.path.join(args.output_path, 'labeled_train.txt')
+        os.path.join(args.output_path, 'labeled_train_sd.txt')
     )
     process_labels(
         os.path.join(args.output_path, 'pa_label_validation.txt'),
         args.label_csv_file,
-        os.path.join(args.output_path, 'labeled_validation.txt')
+        os.path.join(args.output_path, 'labeled_validation_sd.txt')
     )
     process_labels(
         os.path.join(args.output_path, 'pa_label_test.txt'),
         args.label_csv_file,
-        os.path.join(args.output_path, 'labeled_test.txt')
+        os.path.join(args.output_path, 'labeled_test_sd.txt')
     )

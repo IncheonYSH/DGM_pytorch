@@ -185,6 +185,7 @@ def train(args):
             img_size=args.target_image_size,
             model_dim=[1024, 512, 256],
             dec_dim=[32, 16, 8],
+            relu_activation=True,
         ).to(device)
         D_J = LadaGenerator(
             z_dim=z_dim*2,
@@ -271,8 +272,12 @@ def train(args):
             print(f"체크포인트 '{checkpoint_path}'가 존재하지 않습니다. 새로 학습을 시작합니다.")
             current_time = datetime.now().strftime('%y%m%d%H%M%S')
             checkpoint_path = os.path.join(args.checkpoint_dir, f'checkpoint{current_time}.pth')
+            print(f"Checkpoint path: {checkpoint_path}")
     else:
         print("새로 학습을 시작합니다.")
+        current_time = datetime.now().strftime('%y%m%d%H%M%S')
+        checkpoint_path = os.path.join(args.checkpoint_dir, f'checkpoint{current_time}.pth')
+        print(f"Checkpoint path: {checkpoint_path}")
 
     for epoch in range(start_epoch, args.epochs):
         E_G.train()
@@ -476,16 +481,19 @@ def train(args):
             z_double_prime_sample = y_prime_sample + a_sample  # z'': reconstructed image 2
             z_prime_sample, z_prime_attn_sample = D_J(torch.cat([c_z_sample, c_s_sample], dim=1))  # z': reconstructed image 1
 
+            def to_01(image):
+                return (image + 1) / 2
+            
             # 4x4 그리드로 이미지 생성 함수 정의
-            def make_grid(images):
-                return vutils.make_grid(images.cpu(), normalize=True, scale_each=True, nrow=4)
+            def make_grid(images, normalize=False):
+                return vutils.make_grid(images.cpu(), normalize=normalize, scale_each=True, nrow=4)
 
             # 각 이미지를 4x4 그리드로 생성
-            grid_original = make_grid(sample_img)
-            grid_y_prime = make_grid(y_prime_sample)
-            grid_a = make_grid(a_sample)
-            grid_z_prime = make_grid(z_prime_sample)
-            grid_z_double_prime = make_grid(z_double_prime_sample)
+            grid_original = make_grid(to_01(sample_img))
+            grid_y_prime = make_grid(to_01(y_prime_sample))
+            grid_a = make_grid(to_01(a_sample))
+            grid_z_prime = make_grid(to_01(z_prime_sample))
+            grid_z_double_prime = make_grid(to_01(z_double_prime_sample))
 
             # 텐서보드에 이미지 기록
             writer.add_image('Original Images', grid_original, epoch)
@@ -504,13 +512,13 @@ def train(args):
                     raise ValueError("Attention map size is not a perfect square")
                 attn_map = attn_map.view(attn_map.size(0), attn_map.size(1), sqrt_N, sqrt_N)
                 mean_attn = torch.mean(attn_map, dim=1, keepdim=True)  # (batch_size, 1, H, W)
-                mean_attn = F.interpolate(mean_attn, size=(args.target_image_size, args.target_image_size), mode='nearest', align_corners=False)
+                mean_attn = F.interpolate(mean_attn, size=(args.target_image_size, args.target_image_size), mode='nearest')
                 return mean_attn
             
             def process_and_log_attention_maps(attn_maps, title):
                 for idx, attn_map in enumerate(attn_maps):
                     mean_attn = process_attention_map(attn_map)
-                    grid_attn = make_grid(mean_attn)
+                    grid_attn = make_grid(mean_attn, normalize=True)
                     writer.add_image(f'Attention Maps/{title} Layer {idx+1}', grid_attn, epoch)
 
             process_and_log_attention_maps(y_prime_attn_sample, 'Syn Normal (y\')')

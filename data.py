@@ -73,7 +73,7 @@ class ImageDataset(Dataset):
         img = TF.resize(img, new_size, interpolation=Image.LANCZOS)
         img = TF.center_crop(img, output_size=(self.target_image_size, self.target_image_size))
         img = TF.to_tensor(img) # min-max normalization to [0, 1]
-        # img = 2. * img - 1.  # 픽셀 값을 [-1, 1] 범위로 스케일링
+        img = 2. * img - 1.  # 픽셀 값을 [-1, 1] 범위로 스케일링
 
         label = self.labels[index]
         return img, label

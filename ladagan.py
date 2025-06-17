@@ -151,7 +151,7 @@ class PositionalEmbedding(nn.Module):
 
 class Generator(nn.Module):
     def __init__(self, z_dim=100, img_size=256, model_dim=[1024, 512, 256], heads=[4, 4, 4], 
-                 mlp_dim=[512, 512, 512], dec_dim=False):
+                 mlp_dim=[512, 512, 512], dec_dim=False, relu_activation=False):
         super(Generator, self).__init__()
         self.z_dim = z_dim
         self.init = nn.Sequential(
@@ -169,6 +169,7 @@ class Generator(nn.Module):
         self.block_32 = SMLadaformer(model_dim[2], z_dim, heads[2], mlp_dim[2])
 
         self.dec_dim = dec_dim
+        self.relu_activation = relu_activation
         if self.dec_dim:
             layers = []
             dim_before = model_dim[2]
@@ -186,8 +187,9 @@ class Generator(nn.Module):
             self.patch_size = img_size // 32
             conv_in_dim = model_dim[2] // (self.patch_size ** 2)
 
-        # We use grayscale image. If you want to use RGB image, edit conv2d input channel to 3.
+        # We use grayscale image. If you want to use RGB image, edit conv2d output channel to 3.
         self.ch_conv = nn.Conv2d(conv_in_dim, 1, kernel_size=3, padding=1)
+        self.relu = nn.ReLU()
 
     def forward(self, z):
         B = z.size(0)
@@ -210,6 +212,8 @@ class Generator(nn.Module):
         elif self.patch_size != 1:
             x = F.pixel_shuffle(x, upscale_factor=self.patch_size)
         x = self.ch_conv(x)
+        if self.relu_activation:
+            x = self.relu(x)
         return [x, [attn_8, attn_16, attn_32]]
 
 
