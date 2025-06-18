@@ -13,6 +13,8 @@ Run the preprocessing script using `preprocess.sh`:
 bash preprocess.sh <base_path> <metadata_csv> <split_csv> <label_csv> <output_dir> [mimic_csv] [chexbert_ckpt] [device]
 ```
 
+Specify `device` as either `cpu` or a CUDA device such as `cuda` or `cuda:0`.
+
 This will generate multiple text files such as `labeled_train_sd.txt` which are used for training.
 
 ## Training
