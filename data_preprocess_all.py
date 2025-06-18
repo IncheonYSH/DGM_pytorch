@@ -367,8 +367,24 @@ def process_labels(pa_label_file, label_csv_file, output_file):
     logging.info(f"최종 결과를 {output_file}에 저장하였습니다.")
 
 
-def filter_with_mimic_forced_generation(label_file, mimic_csv_file, output_file, chexbert_ckpt, device="cpu"):
-    """Filter labeled data with additional conditions from mimic_forced_generation."""
+def filter_with_mimic_forced_generation(label_file, mimic_csv_file, output_file, chexbert_ckpt, device="cpu", log_interval=100):
+    """Filter labeled data with additional conditions from mimic_forced_generation.
+
+    Parameters
+    ----------
+    label_file : str
+        Path to the label file produced in the previous steps.
+    mimic_csv_file : str
+        CSV file from mimic_forced_generation containing findings and impression columns.
+    output_file : str
+        Destination path for the filtered output.
+    chexbert_ckpt : str
+        Path to the CheXbert checkpoint.
+    device : str, optional
+        Device for running CheXbert. Defaults to ``"cpu"``.
+    log_interval : int, optional
+        Interval for logging progress information. Defaults to ``100``.
+    """
     mimic_df = pd.read_csv(mimic_csv_file)
     mimic_df['subject_id'] = mimic_df['subject_id'].astype(str)
     mimic_df['study_id'] = mimic_df['study_id'].astype(str)
@@ -378,7 +394,8 @@ def filter_with_mimic_forced_generation(label_file, mimic_csv_file, output_file,
     chex_model, chex_tokenizer = load_chexbert_model_and_tokenizer(chexbert_ckpt, device=device)
 
     label_dict = {}
-    for _, row in mimic_df.iterrows():
+    total_rows = len(mimic_df)
+    for idx, (_, row) in enumerate(mimic_df.iterrows(), 1):
         preds_find = get_chexbert_predictions(str(row['findings']), chex_model, chex_tokenizer, device=device)
         preds_imp = get_chexbert_predictions(str(row['impression']), chex_model, chex_tokenizer, device=device)
         if preds_find is None or preds_imp is None:
@@ -387,12 +404,17 @@ def filter_with_mimic_forced_generation(label_file, mimic_csv_file, output_file,
             label = chexbert_label_to_binary(preds_imp)
             if label is not None:
                 label_dict[(row['subject_id'], row['study_id'])] = label
+        if idx % log_interval == 0 or idx == total_rows:
+            logging.info(
+                "ChexBERT filtering %d/%d rows processed", idx, total_rows
+            )
 
     with open(label_file, 'r') as f:
         lines = [line.strip() for line in f.readlines() if line.strip()]
 
     out_lines = []
-    for line in lines:
+    total_lines = len(lines)
+    for idx, line in enumerate(lines, 1):
         try:
             img_path, _ = line.split(',')
             img_path = img_path.strip()
@@ -404,6 +426,10 @@ def filter_with_mimic_forced_generation(label_file, mimic_csv_file, output_file,
         key = (subj_id, study_id)
         if key in label_dict:
             out_lines.append(f"{img_path}, {label_dict[key]}")
+        if idx % log_interval == 0 or idx == total_lines:
+            logging.info(
+                "Applying ChexBERT filter to labels %d/%d", idx, total_lines
+            )
 
     with open(output_file, 'w') as f:
         for line in out_lines:
