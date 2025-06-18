@@ -9,7 +9,7 @@ LABEL_CSV="/data/mimic-cxr-jpg/mimic-cxr-2.0.0-chexpert.csv"
 OUTPUT_PATH="./data"
 MIMIC_CSV="/home/shyoon/rrg_ttc/forced_generation/mimic_forced_generation.csv"
 CHEXBERT_CKPT="/home/shyoon/CheXbert/chexbert.pth"
-DEVICE="gpu"
+DEVICE="cuda"
 
 python data_preprocess_all.py \
     --base_path "$BASE_PATH" \

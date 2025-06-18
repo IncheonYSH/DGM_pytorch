@@ -68,6 +68,8 @@ class bert_labeler(nn.Module):
 
 
 def load_chexbert_model_and_tokenizer(checkpoint_path, device="cpu"):
+    if isinstance(device, str) and device.lower() == "gpu":
+        device = "cuda"
     model = bert_labeler()
     checkpoint = torch.load(checkpoint_path, map_location=device)
     if "model_state_dict" in checkpoint:
