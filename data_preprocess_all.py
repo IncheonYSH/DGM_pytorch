@@ -368,7 +368,13 @@ def process_labels(pa_label_file, label_csv_file, output_file):
 
 
 def filter_with_mimic_forced_generation(label_file, mimic_csv_file, output_file, chexbert_ckpt, device="cpu", log_interval=100):
-    """Filter labeled data with additional conditions from mimic_forced_generation.
+    """Filter labeled data using findings and impression text.
+
+    The function uses CheXbert to predict labels for the ``findings`` and
+    ``impression`` sections in ``mimic_forced_generation``. Images are labeled
+    as normal only when *both* sections are predicted as ``No Finding``.  Any
+    other combination is treated as abnormal.  This differs from the previous
+    implementation which required the two predictions to match exactly.
 
     Parameters
     ----------
@@ -400,10 +406,20 @@ def filter_with_mimic_forced_generation(label_file, mimic_csv_file, output_file,
         preds_imp = get_chexbert_predictions(str(row['impression']), chex_model, chex_tokenizer, device=device)
         if preds_find is None or preds_imp is None:
             continue
-        if preds_find == preds_imp:
-            label = chexbert_label_to_binary(preds_imp)
-            if label is not None:
-                label_dict[(row['subject_id'], row['study_id'])] = label
+
+        label_find = chexbert_label_to_binary(preds_find)
+        label_imp = chexbert_label_to_binary(preds_imp)
+        if label_find is None or label_imp is None:
+            continue
+
+        # Normal label only when both sections are predicted as 'No Finding'
+        if label_find == 0 and label_imp == 0:
+            label = 0
+        else:
+            # If any section indicates abnormality, mark as abnormal
+            label = 1
+
+        label_dict[(row['subject_id'], row['study_id'])] = label
         if idx % log_interval == 0 or idx == total_rows:
             logging.info(
                 "ChexBERT filtering %d/%d rows processed", idx, total_rows
