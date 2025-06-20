@@ -123,6 +123,14 @@ def compute_grad2(d_out, x_in):
     reg = grad_dout2.view(batch_size, -1).sum(1)
     return reg
 
+def decode_with_attention(decoder, inputs):
+    """Run decoder and gracefully handle outputs with or without attention maps."""
+    output = decoder(inputs)
+    if isinstance(output, (list, tuple)) and len(output) == 2:
+        return output[0], output[1]
+    else:
+        return output, None
+
 def train(args):
     device = torch.device(f"cuda:{args.gpu}" if torch.cuda.is_available() else "cpu")
     print(device)
@@ -318,7 +326,7 @@ def train(args):
                 c_s = E_F(img)
 
                 with torch.no_grad():
-                    y_prime, y_prime_attn = D_G(c_z)
+                    y_prime, y_prime_attn = decode_with_attention(D_G, c_z)
 
                 # 판별자 손실 계산
                 img.requires_grad_(True)
@@ -361,10 +369,10 @@ def train(args):
             c_s = E_F(img)
 
             # 디코딩
-            y_prime, y_prime_attn = D_G(c_z)
-            a, a_attn = D_F(c_s)
+            y_prime, y_prime_attn = decode_with_attention(D_G, c_z)
+            a, a_attn = decode_with_attention(D_F, c_s)
             z_double_prime = y_prime + a  # z'' 재구성된 이미지 2
-            z_prime, z_prime_attn = D_J(torch.cat([c_z, c_s], dim=1))  # z' 재구성된 이미지 1
+            z_prime, z_prime_attn = decode_with_attention(D_J, torch.cat([c_z, c_s], dim=1))  # z' 재구성된 이미지 1
 
             # 생성자 손실 계산
             # reduction='mean' is applied in default
@@ -429,10 +437,10 @@ def train(args):
                 c_z = E_G(img)
                 c_s = E_F(img)
 
-                y_prime, y_prime_attn = D_G(c_z)
-                a, a_attn = D_F(c_s)
+                y_prime, y_prime_attn = decode_with_attention(D_G, c_z)
+                a, a_attn = decode_with_attention(D_F, c_s)
                 z_double_prime = y_prime + a
-                z_prime, z_prime_attn = D_J(torch.cat([c_z, c_s], dim=1))
+                z_prime, z_prime_attn = decode_with_attention(D_J, torch.cat([c_z, c_s], dim=1))
 
                 loss_R1 = criterion_L1(z_prime, img)
                 loss_R2 = criterion_L1(z_double_prime, img)
@@ -476,10 +484,10 @@ def train(args):
             c_s_sample = E_F(sample_img)
 
             # 디코더를 통해 이미지 생성
-            y_prime_sample, y_prime_attn_sample = D_G(c_z_sample)          # y': syn. normal image
-            a_sample, a_attn_sample = D_F(c_s_sample)                # a: residual map
+            y_prime_sample, y_prime_attn_sample = decode_with_attention(D_G, c_z_sample)          # y': syn. normal image
+            a_sample, a_attn_sample = decode_with_attention(D_F, c_s_sample)                # a: residual map
             z_double_prime_sample = y_prime_sample + a_sample  # z'': reconstructed image 2
-            z_prime_sample, z_prime_attn_sample = D_J(torch.cat([c_z_sample, c_s_sample], dim=1))  # z': reconstructed image 1
+            z_prime_sample, z_prime_attn_sample = decode_with_attention(D_J, torch.cat([c_z_sample, c_s_sample], dim=1))  # z': reconstructed image 1
 
             def to_01(image):
                 return (image + 1) / 2
@@ -521,9 +529,12 @@ def train(args):
                     grid_attn = make_grid(mean_attn, normalize=True)
                     writer.add_image(f'Attention Maps/{title} Layer {idx+1}', grid_attn, epoch)
 
-            process_and_log_attention_maps(y_prime_attn_sample, 'Syn Normal (y\')')
-            process_and_log_attention_maps(a_attn_sample, 'Residual (a)')
-            process_and_log_attention_maps(z_prime_attn_sample, 'Recon1 (z\')')
+            if y_prime_attn_sample is not None:
+                process_and_log_attention_maps(y_prime_attn_sample, 'Syn Normal (y\')')
+            if a_attn_sample is not None:
+                process_and_log_attention_maps(a_attn_sample, 'Residual (a)')
+            if z_prime_attn_sample is not None:
+                process_and_log_attention_maps(z_prime_attn_sample, 'Recon1 (z\')')
 
             # 텍스트 형식의 라벨 정보 기록
             for i in range(num_samples):
