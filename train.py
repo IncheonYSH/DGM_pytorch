@@ -581,28 +581,28 @@ if __name__ == "__main__":
     ### WGAN clip boundary ###
     parser.add_argument('--clip_value', type=float, default=0.01, help='Clip boundary for WGAN training') # default value from paper
     ### Common optimizer setup ###
-    parser.add_argument('--initial_lr_g', type=float, default=1e-5, help='generator 초기 학습률')
-    parser.add_argument('--initial_lr_d', type=float, default=1e-5, help='discriminator 초기 학습률')
+    parser.add_argument('--initial_lr_g', type=float, default=5e-5, help='generator 초기 학습률')
+    parser.add_argument('--initial_lr_d', type=float, default=5e-5, help='discriminator 초기 학습률')
     parser.add_argument('--lr_scheduler', type=str, choices=['step_decay', 'cosine_decay'], default='step_decay', help='학습률 스케줄링 방식 선택')
-    parser.add_argument('--weight_decay', type=float, default=1e-4, help='가중치 감소율')
+    parser.add_argument('--weight_decay', type=float, default=1e-7, help='가중치 감소율')
     # (0, 0.9) for WGANs. (0.5, 0.999) for others
     parser.add_argument('--beta_1', type=float, default=0.5, help="Adam optimizer momentum parameter")
     parser.add_argument('--beta_2', type=float, default=0.999, help="Adam optimizer momentum parameter")
     ### For cosine decay ###
     parser.add_argument('--min_lr', type=float, default=1e-6, help='최소 학습률')
     parser.add_argument('--warmup_iters', type=int, default=1000, help='warmup 단계의 반복 수')
-    parser.add_argument('--lr_decay_iters', type=int, default=45000, help='학습률이 최소가 되는 반복 수')
+    parser.add_argument('--lr_decay_iters', type=int, default=40000, help='학습률이 최소가 되는 반복 수')
     ### For step decay ###
     parser.add_argument('--decay_epoch', type=int, default=10, help='step decay에서 학습률 감소 주기')
     parser.add_argument('--lr_decay', type=float, default=0.5, help='step decay에서 학습률 감소 비율')
     ### Loss function hyperparameters ###
     parser.add_argument('--lambda_A', type=float, default=10.0, help='적대적 손실 가중치')
     parser.add_argument('--lambda_R', type=float, default=10.0, help='복원 손실 가중치')
-    parser.add_argument('--lambda_TV', type=float, default=1.0, help='총 변동 손실 가중치')
+    parser.add_argument('--lambda_TV', type=float, default=0.5, help='총 변동 손실 가중치')
     parser.add_argument('--lambda_GP', type=float, default=10, help='Gradienta penalty 가중치')
     ### Modified training algorithm options ###
     parser.add_argument('--alt_loss', action='store_true', help='수정된 adverserial loss function 사용 여부')
-    parser.add_argument('--alt_loss_epochs', type=int, default=5, help='수정된 adverserial loss function 사용할 에포크 수')
+    parser.add_argument('--alt_loss_epochs', type=int, default=1, help='수정된 adverserial loss function 사용할 에포크 수')
     # In original vanilla gan paper, 1~5 is recommanded. For WGAN, 5 is recommanded in original paper.
     parser.add_argument('--d_steps', type=int, default=1, help='D를 최적화할 스텝 수')
 
